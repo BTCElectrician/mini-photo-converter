@@ -61,9 +61,19 @@ def _get_realesrgan(model_name: str = "RealESRGAN_x4plus", scale: int = 4, denoi
         from basicsr.archs.rrdbnet_arch import RRDBNet
         import torch
 
-        # Determine device
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        half_precision = device == 'cuda'  # Use fp16 on GPU for speed
+        # Determine best available device
+        # Priority: CUDA (NVIDIA) > MPS (Apple Silicon) > CPU
+        if torch.cuda.is_available():
+            device = 'cuda'
+            half_precision = True  # FP16 works great on NVIDIA
+        elif torch.backends.mps.is_available():
+            device = 'mps'  # Apple Silicon GPU (M1/M2/M3)
+            half_precision = False  # MPS doesn't support FP16 well yet
+        else:
+            device = 'cpu'
+            half_precision = False
+
+        print(f"[Real-ESRGAN] Using device: {device}")
 
         # Model configurations
         if model_name == 'RealESRGAN_x4plus':

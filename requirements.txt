@@ -14,9 +14,20 @@ basicsr>=1.4.2
 
 # PyTorch - Required for AI models (Real-ESRGAN, etc.)
 # Install the right version for your system:
-#   CPU only:  pip install torch torchvision
-#   CUDA 11.8: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-#   CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+#   Apple Silicon (M1/M2/M3) - MPS acceleration (RECOMMENDED):
+#     pip install torch torchvision
+#     (PyTorch auto-detects MPS and uses your GPU!)
+#
+#   CPU only:
+#     pip install torch torchvision
+#
+#   NVIDIA CUDA 11.8:
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#
+#   NVIDIA CUDA 12.1:
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
 torch>=2.0.0
 torchvision>=0.15.0
 
