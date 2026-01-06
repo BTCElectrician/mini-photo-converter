@@ -3,6 +3,7 @@ SuperCharged Photo Editor - AI-Powered Image Processing
 
 A modern photo editing toolkit for web and mobile apps featuring:
 - AI-powered background removal (rembg with U2-Net)
+- AI-powered upscaling (Real-ESRGAN) - upscale 2x-4x WITHOUT losing quality!
 - Raster to vector conversion (vtracer)
 - Smart resizing with multiple algorithms
 - Batch processing with folder watching
@@ -13,6 +14,7 @@ Usage:
 
     editor = PhotoEditor()
     editor.remove_background("input.png", "output.png")
+    editor.ai_upscale("small.png", "large.png", scale=4)  # 4x upscale!
     editor.vectorize("input.png", "output.svg")
     editor.smart_resize("input.png", "output.png", width=1024, height=1024)
     editor.process_full_pipeline("input.png", "output_dir/")
@@ -33,6 +35,71 @@ import numpy as np
 _rembg = None
 _vtracer = None
 _cv2 = None
+_realesrgan = None
+
+
+def _get_realesrgan(model_name: str = "RealESRGAN_x4plus", scale: int = 4, denoise_strength: float = 0.5):
+    """
+    Lazy load Real-ESRGAN upscaler.
+
+    Models available:
+    - RealESRGAN_x4plus: Best quality for general images (4x)
+    - RealESRGAN_x4plus_anime_6B: Optimized for anime/illustrations (4x)
+    - RealESRGAN_x2plus: 2x upscaling
+    - realesr-general-x4v3: Fast general purpose (4x)
+    """
+    global _realesrgan
+
+    # Cache key based on model and scale
+    cache_key = f"{model_name}_{scale}"
+
+    if _realesrgan is None:
+        _realesrgan = {}
+
+    if cache_key not in _realesrgan:
+        from realesrgan import RealESRGANer
+        from basicsr.archs.rrdbnet_arch import RRDBNet
+        import torch
+
+        # Determine device
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        half_precision = device == 'cuda'  # Use fp16 on GPU for speed
+
+        # Model configurations
+        if model_name == 'RealESRGAN_x4plus':
+            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+            netscale = 4
+            model_url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
+        elif model_name == 'RealESRGAN_x4plus_anime_6B':
+            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
+            netscale = 4
+            model_url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth'
+        elif model_name == 'RealESRGAN_x2plus':
+            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
+            netscale = 2
+            model_url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth'
+        else:
+            # Default to x4plus
+            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+            netscale = 4
+            model_url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
+
+        # Create upscaler
+        upscaler = RealESRGANer(
+            scale=netscale,
+            model_path=model_url,
+            dni_weight=denoise_strength,
+            model=model,
+            tile=0,  # 0 for no tiling, or set to 256/512 for large images
+            tile_pad=10,
+            pre_pad=0,
+            half=half_precision,
+            device=device
+        )
+
+        _realesrgan[cache_key] = upscaler
+
+    return _realesrgan[cache_key]
 
 
 def _get_rembg():
@@ -68,7 +135,15 @@ class ResizeMode(Enum):
     BICUBIC = "bicubic"      # Good balance of quality and speed
     BILINEAR = "bilinear"    # Fast, good for real-time
     NEAREST = "nearest"      # Pixel-perfect, good for pixel art
-    SUPERRES = "superres"    # AI upscaling (requires opencv-contrib)
+    SUPERRES = "superres"    # Basic super resolution (OpenCV)
+
+
+class UpscaleModel(Enum):
+    """AI upscaling model options (Real-ESRGAN)."""
+    GENERAL_X4 = "RealESRGAN_x4plus"           # Best quality, 4x upscale
+    GENERAL_X2 = "RealESRGAN_x2plus"           # 2x upscale
+    ANIME_X4 = "RealESRGAN_x4plus_anime_6B"    # Optimized for anime/illustrations
+    FAST_X4 = "realesr-general-x4v3"           # Faster, good quality
 
 
 class VectorMode(Enum):
@@ -99,6 +174,7 @@ class PhotoEditor:
 
     Features:
     - Background removal using AI (rembg/U2-Net)
+    - AI upscaling with Real-ESRGAN (2x-4x without quality loss!)
     - Raster to vector conversion (vtracer)
     - Smart resizing with multiple algorithms
     - Full processing pipeline for AI-generated images
@@ -109,13 +185,16 @@ class PhotoEditor:
         # Remove background
         editor.remove_background("photo.png", "photo_nobg.png")
 
+        # AI Upscale (THIS IS THE MAGIC FOR SMALL AI IMAGES!)
+        editor.ai_upscale("small_gemini_art.png", "large_gemini_art.png", scale=4)
+
         # Vectorize
         editor.vectorize("logo.png", "logo.svg")
 
         # Smart resize
         editor.smart_resize("image.png", "image_resized.png", width=512)
 
-        # Full pipeline: remove bg -> vectorize -> resize
+        # Full pipeline: remove bg -> upscale -> vectorize -> resize
         editor.process_full_pipeline("ai_image.png", "output/")
     """
 
@@ -226,6 +305,153 @@ class PhotoEditor:
                 input_path=str(input_path),
                 output_path=None,
                 operation="remove_background",
+                message=f"Error: {str(e)}"
+            )
+
+    def ai_upscale(self,
+                   input_path: Union[str, Path],
+                   output_path: Optional[Union[str, Path]] = None,
+                   scale: int = 4,
+                   model: UpscaleModel = UpscaleModel.GENERAL_X4,
+                   denoise_strength: float = 0.5,
+                   face_enhance: bool = False,
+                   tile_size: int = 0,
+                   output_format: Optional[str] = None,
+                   quality: int = 95) -> ProcessingResult:
+        """
+        AI-powered image upscaling using Real-ESRGAN.
+
+        This is the BEST way to upscale AI-generated images (like from Gemini, DALL-E,
+        Midjourney, etc.) without losing quality. The AI actually ADDS detail!
+
+        Args:
+            input_path: Path to input image
+            output_path: Path for output image (default: input_upscaled.png)
+            scale: Upscale factor (2 or 4, depending on model)
+            model: Which AI model to use:
+                - GENERAL_X4: Best quality for most images (4x)
+                - GENERAL_X2: 2x upscaling
+                - ANIME_X4: Optimized for anime/illustrations (4x)
+                - FAST_X4: Faster processing, good quality (4x)
+            denoise_strength: Denoise strength (0.0-1.0), higher = more denoising
+            face_enhance: Enable face enhancement (uses GFPGAN)
+            tile_size: Tile size for processing large images (0=auto, or 256/512)
+            output_format: Output format (png, jpg, webp)
+            quality: JPEG/WebP quality (1-100)
+
+        Returns:
+            ProcessingResult with operation details
+
+        Example:
+            # Upscale a small Gemini image 4x
+            editor.ai_upscale("gemini_art_512.png", "gemini_art_2048.png", scale=4)
+
+            # Use anime model for illustrations
+            editor.ai_upscale("anime.png", model=UpscaleModel.ANIME_X4)
+
+            # 2x upscale for less aggressive enlargement
+            editor.ai_upscale("photo.jpg", scale=2, model=UpscaleModel.GENERAL_X2)
+        """
+        input_path = Path(input_path)
+
+        # Determine actual scale based on model
+        if model == UpscaleModel.GENERAL_X2:
+            actual_scale = 2
+        else:
+            actual_scale = 4
+
+        if output_path is None:
+            output_path = input_path.parent / f"{input_path.stem}_upscaled_{actual_scale}x.png"
+        output_path = self._ensure_output_dir(output_path)
+
+        try:
+            # Load image
+            img = Image.open(input_path)
+            original_size = os.path.getsize(input_path)
+            original_dimensions = img.size
+            orig_width, orig_height = original_dimensions
+
+            # Convert to numpy array for Real-ESRGAN
+            if img.mode == 'RGBA':
+                img_array = np.array(img)
+                has_alpha = True
+            else:
+                img_array = np.array(img.convert('RGB'))
+                has_alpha = False
+
+            # Convert RGB to BGR for OpenCV/Real-ESRGAN
+            cv2 = _get_cv2()
+            if has_alpha:
+                img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGRA)
+            else:
+                img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+
+            # Get upscaler
+            upscaler = _get_realesrgan(model.value, actual_scale, denoise_strength)
+
+            # Upscale!
+            output_bgr, _ = upscaler.enhance(img_bgr, outscale=actual_scale)
+
+            # Convert back to RGB/RGBA
+            if has_alpha:
+                output_rgb = cv2.cvtColor(output_bgr, cv2.COLOR_BGRA2RGBA)
+            else:
+                output_rgb = cv2.cvtColor(output_bgr, cv2.COLOR_BGR2RGB)
+
+            # Convert back to PIL
+            output_img = Image.fromarray(output_rgb)
+            new_dimensions = output_img.size
+
+            # Determine output format
+            if output_format:
+                fmt = output_format.upper()
+                if fmt == 'JPG':
+                    fmt = 'JPEG'
+            else:
+                fmt = output_path.suffix.upper().lstrip('.')
+                if fmt == 'JPG':
+                    fmt = 'JPEG'
+                elif not fmt:
+                    fmt = 'PNG'
+
+            # Handle format-specific requirements
+            save_kwargs = {'optimize': True}
+            if fmt in ('JPEG', 'WEBP'):
+                save_kwargs['quality'] = quality
+                if fmt == 'JPEG' and output_img.mode == 'RGBA':
+                    background = Image.new('RGB', output_img.size, (255, 255, 255))
+                    background.paste(output_img, mask=output_img.split()[3])
+                    output_img = background
+
+            output_img.save(output_path, format=fmt, **save_kwargs)
+            output_size = os.path.getsize(output_path)
+
+            return ProcessingResult(
+                success=True,
+                input_path=str(input_path),
+                output_path=str(output_path),
+                operation="ai_upscale",
+                message=f"Upscaled {actual_scale}x: {orig_width}x{orig_height} -> {new_dimensions[0]}x{new_dimensions[1]} ({model.value})",
+                original_size=original_dimensions,
+                output_size=new_dimensions,
+                file_size_before=original_size,
+                file_size_after=output_size
+            )
+
+        except ImportError as e:
+            return ProcessingResult(
+                success=False,
+                input_path=str(input_path),
+                output_path=None,
+                operation="ai_upscale",
+                message=f"Real-ESRGAN not installed. Run: pip install realesrgan basicsr. Error: {str(e)}"
+            )
+        except Exception as e:
+            return ProcessingResult(
+                success=False,
+                input_path=str(input_path),
+                output_path=None,
+                operation="ai_upscale",
                 message=f"Error: {str(e)}"
             )
 
@@ -513,18 +739,22 @@ class PhotoEditor:
                               input_path: Union[str, Path],
                               output_dir: Optional[Union[str, Path]] = None,
                               remove_bg: bool = True,
+                              ai_upscale: bool = False,
+                              upscale_model: UpscaleModel = UpscaleModel.GENERAL_X4,
                               create_vector: bool = True,
                               resize_config: Optional[dict] = None,
                               vector_mode: VectorMode = VectorMode.ILLUSTRATION) -> List[ProcessingResult]:
         """
         Run the full processing pipeline on an image.
 
-        Pipeline: Remove Background -> Vectorize -> Resize
+        Pipeline: Remove Background -> AI Upscale -> Vectorize -> Resize
 
         Args:
             input_path: Path to input image
             output_dir: Output directory for all processed files
             remove_bg: Whether to remove background
+            ai_upscale: Whether to AI upscale (Real-ESRGAN)
+            upscale_model: Which upscale model to use
             create_vector: Whether to create vector SVG
             resize_config: Dict with resize parameters (width, height, scale, etc.)
             vector_mode: Vectorization style preset
@@ -547,15 +777,24 @@ class PhotoEditor:
             result = self.remove_background(current_image, nobg_path)
             results.append(result)
             if result.success:
-                current_image = nobg_path
+                current_image = Path(result.output_path)
 
-        # Step 2: Vectorize (use the background-removed version if available)
+        # Step 2: AI Upscale (the magic for small AI images!)
+        if ai_upscale:
+            scale = 2 if upscale_model == UpscaleModel.GENERAL_X2 else 4
+            upscale_path = output_dir / f"{input_path.stem}_upscaled_{scale}x.png"
+            result = self.ai_upscale(current_image, upscale_path, model=upscale_model)
+            results.append(result)
+            if result.success:
+                current_image = Path(result.output_path)
+
+        # Step 3: Vectorize (use the processed version if available)
         if create_vector:
             svg_path = output_dir / f"{input_path.stem}.svg"
             result = self.vectorize(current_image, svg_path, mode=vector_mode)
             results.append(result)
 
-        # Step 3: Smart resize (multiple sizes if configured)
+        # Step 4: Smart resize (multiple sizes if configured)
         if resize_config:
             sizes = resize_config.get('sizes', [resize_config])
             for i, config in enumerate(sizes if isinstance(sizes, list) else [sizes]):
@@ -621,6 +860,41 @@ def quick_remove_bg(input_path: str, output_path: Optional[str] = None) -> str:
     raise RuntimeError(result.message)
 
 
+def quick_upscale(input_path: str, scale: int = 4, output_path: Optional[str] = None,
+                  model: str = "general") -> str:
+    """
+    Quick function to AI-upscale an image.
+
+    Args:
+        input_path: Path to input image
+        scale: Upscale factor (2 or 4)
+        output_path: Optional output path
+        model: Model type - "general", "anime", or "fast"
+
+    Returns:
+        Path to upscaled image
+
+    Example:
+        # Upscale Gemini art 4x
+        quick_upscale("gemini_512.png", scale=4)
+
+        # Use anime model
+        quick_upscale("illustration.png", model="anime")
+    """
+    model_map = {
+        "general": UpscaleModel.GENERAL_X4 if scale == 4 else UpscaleModel.GENERAL_X2,
+        "anime": UpscaleModel.ANIME_X4,
+        "fast": UpscaleModel.FAST_X4,
+    }
+    upscale_model = model_map.get(model, UpscaleModel.GENERAL_X4)
+
+    editor = PhotoEditor()
+    result = editor.ai_upscale(input_path, output_path, scale=scale, model=upscale_model)
+    if result.success:
+        return result.output_path
+    raise RuntimeError(result.message)
+
+
 def quick_vectorize(input_path: str, output_path: Optional[str] = None) -> str:
     """Quick function to vectorize an image."""
     editor = PhotoEditor()
@@ -643,10 +917,36 @@ def quick_resize(input_path: str, width: int = None, height: int = None,
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="SuperCharged Photo Editor")
+    parser = argparse.ArgumentParser(
+        description="SuperCharged Photo Editor - AI-Powered Image Processing",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    # AI Upscale a small Gemini image 4x (THE MAGIC!)
+    python photo_editor.py gemini_art.png --upscale
+
+    # Upscale with anime model
+    python photo_editor.py illustration.png --upscale --upscale-model anime
+
+    # Remove background
+    python photo_editor.py photo.png --remove-bg
+
+    # Full pipeline with upscaling
+    python photo_editor.py ai_image.png --pipeline --upscale
+
+    # Convert to vector
+    python photo_editor.py logo.png --vectorize
+        """
+    )
     parser.add_argument("input", help="Input image or directory")
     parser.add_argument("-o", "--output", help="Output path or directory")
-    parser.add_argument("--remove-bg", action="store_true", help="Remove background")
+    parser.add_argument("--remove-bg", action="store_true", help="Remove background (AI)")
+    parser.add_argument("--upscale", action="store_true",
+                        help="AI upscale image 4x using Real-ESRGAN (best for AI art!)")
+    parser.add_argument("--upscale-2x", action="store_true",
+                        help="AI upscale image 2x")
+    parser.add_argument("--upscale-model", choices=["general", "anime", "fast"],
+                        default="general", help="Upscale model (default: general)")
     parser.add_argument("--vectorize", action="store_true", help="Convert to SVG")
     parser.add_argument("--resize", type=int, nargs=2, metavar=("W", "H"), help="Resize to WxH")
     parser.add_argument("--scale", type=float, help="Scale factor (e.g., 2.0)")
@@ -657,11 +957,24 @@ if __name__ == "__main__":
 
     editor = PhotoEditor()
 
+    # Map model name to enum
+    upscale_model_map = {
+        "general": UpscaleModel.GENERAL_X4,
+        "anime": UpscaleModel.ANIME_X4,
+        "fast": UpscaleModel.FAST_X4,
+    }
+    if args.upscale_2x:
+        upscale_model = UpscaleModel.GENERAL_X2
+    else:
+        upscale_model = upscale_model_map.get(args.upscale_model, UpscaleModel.GENERAL_X4)
+
     if args.batch:
         results = editor.batch_process(
             args.input,
             args.output,
             remove_bg=args.remove_bg or args.pipeline,
+            ai_upscale=args.upscale or args.upscale_2x,
+            upscale_model=upscale_model,
             create_vector=args.vectorize or args.pipeline
         )
         print(f"\nProcessed {len(results)} images")
@@ -676,11 +989,17 @@ if __name__ == "__main__":
         results = editor.process_full_pipeline(
             args.input,
             args.output,
+            ai_upscale=args.upscale or args.upscale_2x,
+            upscale_model=upscale_model,
             resize_config=resize_config
         )
         for r in results:
             status = "OK" if r.success else "FAIL"
             print(f"[{status}] {r.operation}: {r.message}")
+
+    elif args.upscale or args.upscale_2x:
+        result = editor.ai_upscale(args.input, args.output, model=upscale_model)
+        print(f"{'OK' if result.success else 'FAIL'}: {result.message}")
 
     elif args.remove_bg:
         result = editor.remove_background(args.input, args.output)

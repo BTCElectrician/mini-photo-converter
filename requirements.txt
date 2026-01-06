@@ -7,6 +7,19 @@ Pillow>=10.0.0
 # AI-powered background removal (uses U2-Net deep learning)
 rembg>=2.0.50
 
+# AI-powered image upscaling (Real-ESRGAN) - THE MAGIC FOR SMALL AI IMAGES!
+# This lets you upscale Gemini/DALL-E/Midjourney images 2x-4x WITHOUT losing quality
+realesrgan>=0.3.0
+basicsr>=1.4.2
+
+# PyTorch - Required for AI models (Real-ESRGAN, etc.)
+# Install the right version for your system:
+#   CPU only:  pip install torch torchvision
+#   CUDA 11.8: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#   CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.0.0
+torchvision>=0.15.0
+
 # Raster to vector conversion (Rust-based, fast)
 vtracer>=0.6.0
 
@@ -16,8 +29,12 @@ watchdog>=3.0.0
 # Computer vision and advanced image processing
 opencv-python>=4.8.0
 
-# Numerical operations (required by rembg/opencv)
+# Numerical operations (required by rembg/opencv/realesrgan)
 numpy>=1.24.0
+
+# Optional: Face enhancement for upscaling
+# ----------------------------------------
+# gfpgan>=1.3.8           # Face restoration/enhancement
 
 # Optional: For enhanced image operations
 # ----------------------------------------

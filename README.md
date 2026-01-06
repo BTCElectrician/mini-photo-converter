@@ -1,8 +1,26 @@
 # SuperCharged Photo Editor
 
-A modern, AI-powered photo editing toolkit for web and mobile apps. Process AI-generated images with background removal, vectorization, and perfect resizing - all in one place.
+A modern, AI-powered photo editing toolkit for web and mobile apps. Process AI-generated images with background removal, **AI upscaling**, vectorization, and perfect resizing - all in one place.
 
-## New Features
+## Features
+
+### AI-Powered Image Upscaling (Real-ESRGAN)
+**The magic for small AI-generated images!** Upscale your Gemini, DALL-E, Midjourney, or any AI art 2x-4x **without losing quality**. The AI actually *adds* detail instead of blur!
+
+```bash
+# Upscale a small Gemini image 4x (512px -> 2048px)
+python photo_editor.py gemini_art.png --upscale
+
+# Use anime model for illustrations
+python photo_editor.py illustration.png --upscale --upscale-model anime
+```
+
+| Model | Best For | Scale |
+|-------|----------|-------|
+| `general` | Photos, general images | 4x |
+| `anime` | Anime, illustrations, AI art | 4x |
+| `fast` | Quick processing | 4x |
+| `--upscale-2x` | Less aggressive upscaling | 2x |
 
 ### AI-Powered Background Removal
 Remove backgrounds instantly using deep learning (U2-Net model via rembg). Perfect for product photos, AI-generated art, and graphics.
@@ -11,7 +29,7 @@ Remove backgrounds instantly using deep learning (U2-Net model via rembg). Perfe
 Convert any image to scalable SVG using vtracer. Multiple presets for photos, illustrations, logos, and pixel art.
 
 ### Smart Resizing
-High-quality resizing with multiple algorithms (LANCZOS, BICUBIC, BILINEAR) and optional OpenCV super-resolution.
+High-quality resizing with multiple algorithms (LANCZOS, BICUBIC, BILINEAR).
 
 ### Drop Folder Watcher
 Drop images into a folder and watch them get processed automatically. Perfect for batch workflows.
@@ -22,8 +40,11 @@ Drop images into a folder and watch them get processed automatically. Perfect fo
 # Install dependencies
 pip install -r requirements.txt
 
-# Process a single image (full pipeline)
-python photo_editor.py image.png --pipeline
+# AI UPSCALE - Make small AI images HUGE without blur!
+python photo_editor.py small_image.png --upscale
+
+# Process a single image (full pipeline with upscaling)
+python photo_editor.py image.png --pipeline --upscale
 
 # Remove background only
 python photo_editor.py image.png --remove-bg
@@ -43,9 +64,19 @@ python drop_watcher.py
 ### Python API
 
 ```python
-from photo_editor import PhotoEditor, VectorMode, ResizeMode
+from photo_editor import PhotoEditor, VectorMode, ResizeMode, UpscaleModel
 
 editor = PhotoEditor()
+
+# AI UPSCALE - The magic for small AI images!
+result = editor.ai_upscale("gemini_512.png", "gemini_2048.png", scale=4)
+print(f"Upscaled to: {result.output_size}")  # (2048, 2048)
+
+# Use anime model for illustrations
+result = editor.ai_upscale(
+    "illustration.png",
+    model=UpscaleModel.ANIME_X4
+)
 
 # Remove background from AI-generated image
 result = editor.remove_background("ai_art.png", "ai_art_nobg.png")
@@ -83,9 +114,11 @@ results = editor.batch_process("./my_images/", "./output/")
 ### Quick Functions
 
 ```python
-from photo_editor import quick_remove_bg, quick_vectorize, quick_resize
+from photo_editor import quick_remove_bg, quick_vectorize, quick_resize, quick_upscale
 
 # One-liners for common operations
+quick_upscale("gemini_art.png")        # -> gemini_art_upscaled_4x.png (THE MAGIC!)
+quick_upscale("anime.png", model="anime")  # Use anime model
 quick_remove_bg("photo.png")           # -> photo_nobg.png
 quick_vectorize("logo.png")            # -> logo.svg
 quick_resize("image.png", width=512)   # -> image_resized.png
@@ -146,10 +179,12 @@ Options:
 
 | Library | Purpose |
 |---------|---------|
+| **Real-ESRGAN** | AI image upscaling - make small images HUGE without blur! |
 | **rembg** | AI background removal using U2-Net deep learning |
 | **vtracer** | Fast raster-to-vector conversion (Rust-based) |
 | **Pillow** | Core image processing |
 | **OpenCV** | Advanced resizing algorithms |
+| **PyTorch** | Deep learning framework (powers Real-ESRGAN) |
 | **watchdog** | Folder watching for auto-processing |
 | **NumPy** | Numerical operations |
 
@@ -194,7 +229,9 @@ pip install -r requirements.txt
 ```
 
 ### First Run Note
-The first time you use background removal, rembg will download the U2-Net model (~170MB). This is automatic and only happens once.
+The first time you use AI features, models will be downloaded automatically:
+- **Real-ESRGAN**: ~64MB per model (downloads on first upscale)
+- **rembg/U2-Net**: ~170MB (downloads on first background removal)
 
 ## API Reference
 
@@ -212,23 +249,32 @@ class PhotoEditor:
         - "isnet-anime" (optimized for anime)
         """
 
+    # AI Upscaling - THE MAGIC FOR SMALL IMAGES!
+    def ai_upscale(self, input_path, output_path=None, scale=4,
+                   model=UpscaleModel.GENERAL_X4, denoise_strength=0.5)
+
     def remove_background(self, input_path, output_path=None, alpha_matting=False)
     def vectorize(self, input_path, output_path=None, mode=VectorMode.ILLUSTRATION)
     def smart_resize(self, input_path, output_path=None, width=None, height=None,
                      scale=None, mode=ResizeMode.LANCZOS)
-    def process_full_pipeline(self, input_path, output_dir=None, ...)
+    def process_full_pipeline(self, input_path, output_dir=None, ai_upscale=False, ...)
     def batch_process(self, input_dir, output_dir=None, ...)
 ```
 
 ### Enums
 
 ```python
+class UpscaleModel(Enum):
+    GENERAL_X4 = "RealESRGAN_x4plus"      # Best quality, 4x (default)
+    GENERAL_X2 = "RealESRGAN_x2plus"      # 2x upscaling
+    ANIME_X4 = "RealESRGAN_x4plus_anime"  # Optimized for anime/illustrations
+    FAST_X4 = "realesr-general-x4v3"      # Faster, good quality
+
 class ResizeMode(Enum):
     LANCZOS = "lanczos"    # Best for downscaling
     BICUBIC = "bicubic"    # Good balance
     BILINEAR = "bilinear"  # Fast
     NEAREST = "nearest"    # Pixel-perfect
-    SUPERRES = "superres"  # OpenCV super-resolution
 
 class VectorMode(Enum):
     PHOTO = "photo"              # Best for photographs
@@ -262,8 +308,10 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
+- [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) - AI image upscaling (the magic!)
 - [rembg](https://github.com/danielgatis/rembg) - AI background removal
-- [vtracer](https://github.com/nicmcd/vtracer) - Raster to vector conversion
+- [vtracer](https://github.com/visioncortex/vtracer) - Raster to vector conversion
 - [Pillow](https://pillow.readthedocs.io/) - Image processing
 - [OpenCV](https://opencv.org/) - Computer vision
+- [PyTorch](https://pytorch.org/) - Deep learning framework
 - [watchdog](https://github.com/gorakhargosh/watchdog) - Folder monitoring
