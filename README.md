@@ -215,23 +215,109 @@ mini-photo-converter/
 
 ## Installation
 
+### Apple Silicon (M1/M2/M3) - Recommended Setup
+
+The photo editor fully supports Apple Silicon with **MPS GPU acceleration**. Your M-series chip will be used for fast AI processing!
+
 ```bash
 # Clone the repository
 git clone https://github.com/yourusername/mini-photo-converter.git
 cd mini-photo-converter
 
-# Create virtual environment (recommended)
+# Create virtual environment with Python 3.10+ (required for MPS)
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install PyTorch with MPS support (Apple Silicon GPU)
+pip install --upgrade pip
+pip install torch torchvision
+
+# Verify MPS is available (should print "True")
+python -c "import torch; print(f'MPS available: {torch.backends.mps.is_available()}')"
+
+# Install all other dependencies
+pip install -r requirements.txt
+
+# Test the installation
+python photo_editor.py --help
+```
+
+#### Expected Output on Apple Silicon
+When you run upscaling, you should see:
+```
+[Real-ESRGAN] Using device: mps
+```
+
+#### Performance on Apple Silicon
+
+| Chip | 512→2048 (4x) | 1024→4096 (4x) | RAM Needed |
+|------|---------------|----------------|------------|
+| M1   | ~5-8 sec      | ~20-30 sec     | 8GB+       |
+| M2   | ~4-6 sec      | ~15-25 sec     | 8GB+       |
+| M3   | ~3-5 sec      | ~12-20 sec     | 8GB+       |
+| M3 Pro (36GB) | ~2-4 sec | ~10-15 sec  | Plenty!    |
+
+### Windows / Linux with NVIDIA GPU
+
+```bash
+# Create virtual environment
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# Install PyTorch with CUDA (choose your CUDA version)
+# CUDA 11.8:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# CUDA 12.1:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 # Install dependencies
 pip install -r requirements.txt
 ```
 
+### CPU Only (Any Platform)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+
+# Standard PyTorch (CPU)
+pip install torch torchvision
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+Note: CPU is slower but works on any machine.
+
+### Troubleshooting
+
+**"MPS not available" on Mac:**
+```bash
+# Make sure you have Python 3.10+
+python3 --version
+
+# Reinstall PyTorch
+pip uninstall torch torchvision
+pip install torch torchvision
+```
+
+**Memory errors on large images:**
+```python
+# Use tiling for large images
+editor.ai_upscale("large.png", tile_size=512)
+```
+
+**Slow performance:**
+- Close other GPU-intensive apps
+- Check Activity Monitor → GPU usage
+- Use `--upscale-model fast` for quicker results
+
 ### First Run Note
 The first time you use AI features, models will be downloaded automatically:
 - **Real-ESRGAN**: ~64MB per model (downloads on first upscale)
 - **rembg/U2-Net**: ~170MB (downloads on first background removal)
+
+Models are cached in `~/.cache/` and only download once.
 
 ## API Reference
 
