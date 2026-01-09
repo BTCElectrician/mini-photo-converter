@@ -72,13 +72,9 @@ ehthumbs.db
 Thumbs.db
 
 # Image output directories
-optimized/
-optimized-hq/
-processed\ photos/
-processed-photos/
-processed-banner-photos/
-letterbox-banners/
-reduced_background_images/
+output/
+drop/
+processed/
 
 # Large image files
 *.png
