@@ -36,6 +36,22 @@ _rembg = None
 _vtracer = None
 _cv2 = None
 _realesrgan = None
+_lama = None
+
+
+def _get_lama():
+    """Lazy load LaMa inpainting model for watermark removal."""
+    global _lama
+    if _lama is None:
+        try:
+            from simple_lama_inpainting import SimpleLama
+            _lama = SimpleLama()
+            print("[LaMa] Inpainting model loaded")
+        except ImportError:
+            # Fallback to OpenCV inpainting if LaMa not available
+            print("[LaMa] Not available, using OpenCV inpainting fallback")
+            _lama = "opencv_fallback"
+    return _lama
 
 
 def _get_realesrgan(model_name: str = "RealESRGAN_x4plus", scale: int = 4, denoise_strength: float = 0.5):
@@ -582,6 +598,125 @@ class PhotoEditor:
                 message=f"Error: {str(e)}"
             )
 
+    def remove_watermark(self,
+                         input_path: Union[str, Path],
+                         output_path: Optional[Union[str, Path]] = None,
+                         watermark_position: str = "bottom-right",
+                         watermark_height: int = 50,
+                         watermark_width: int = 200,
+                         padding: int = 10,
+                         use_lama: bool = True) -> ProcessingResult:
+        """
+        Remove watermark from image using AI inpainting.
+
+        Automatically detects and removes watermarks (like Gemini's) from corners.
+        Uses LaMa (Large Mask Inpainting) for best results, with OpenCV fallback.
+
+        Args:
+            input_path: Path to input image
+            output_path: Path for output image (default: input_nowm.png)
+            watermark_position: Where the watermark is located:
+                - "bottom-right" (default, Gemini watermarks)
+                - "bottom-left"
+                - "top-right"
+                - "top-left"
+                - "bottom-center"
+            watermark_height: Height of watermark region in pixels (default: 50)
+            watermark_width: Width of watermark region in pixels (default: 200)
+            padding: Extra padding around watermark region (default: 10)
+            use_lama: Use LaMa AI inpainting (True) or OpenCV fallback (False)
+
+        Returns:
+            ProcessingResult with operation details
+        """
+        input_path = Path(input_path)
+
+        if output_path is None:
+            output_path = input_path.parent / f"{input_path.stem}_nowm.png"
+        output_path = self._ensure_output_dir(output_path)
+
+        try:
+            # Load image
+            img = Image.open(input_path).convert('RGB')
+            img_array = np.array(img)
+            original_size = os.path.getsize(input_path)
+            original_dimensions = img.size
+            width, height = img.size
+
+            # Create mask for watermark region
+            mask = np.zeros((height, width), dtype=np.uint8)
+
+            # Calculate watermark region based on position
+            wm_h = min(watermark_height + padding * 2, height // 4)
+            wm_w = min(watermark_width + padding * 2, width // 3)
+
+            if watermark_position == "bottom-right":
+                y1, y2 = height - wm_h, height
+                x1, x2 = width - wm_w, width
+            elif watermark_position == "bottom-left":
+                y1, y2 = height - wm_h, height
+                x1, x2 = 0, wm_w
+            elif watermark_position == "top-right":
+                y1, y2 = 0, wm_h
+                x1, x2 = width - wm_w, width
+            elif watermark_position == "top-left":
+                y1, y2 = 0, wm_h
+                x1, x2 = 0, wm_w
+            elif watermark_position == "bottom-center":
+                y1, y2 = height - wm_h, height
+                x1, x2 = (width - wm_w) // 2, (width + wm_w) // 2
+            else:
+                # Default to bottom-right
+                y1, y2 = height - wm_h, height
+                x1, x2 = width - wm_w, width
+
+            # Set mask region to white (area to inpaint)
+            mask[y1:y2, x1:x2] = 255
+
+            # Perform inpainting
+            lama = _get_lama() if use_lama else "opencv_fallback"
+
+            if lama != "opencv_fallback":
+                # Use LaMa for high-quality inpainting
+                mask_img = Image.fromarray(mask)
+                result_img = lama(img, mask_img)
+            else:
+                # Fallback to OpenCV inpainting
+                cv2 = _get_cv2()
+                # Use TELEA algorithm for better results on larger areas
+                result_array = cv2.inpaint(
+                    img_array,
+                    mask,
+                    inpaintRadius=5,
+                    flags=cv2.INPAINT_TELEA
+                )
+                result_img = Image.fromarray(result_array)
+
+            # Save result
+            result_img.save(output_path, format='PNG', optimize=True)
+            output_size = os.path.getsize(output_path)
+
+            return ProcessingResult(
+                success=True,
+                input_path=str(input_path),
+                output_path=str(output_path),
+                operation="remove_watermark",
+                message=f"Watermark removed from {watermark_position}",
+                original_size=original_dimensions,
+                output_size=result_img.size,
+                file_size_before=original_size,
+                file_size_after=output_size
+            )
+
+        except Exception as e:
+            return ProcessingResult(
+                success=False,
+                input_path=str(input_path),
+                output_path=None,
+                operation="remove_watermark",
+                message=f"Error: {str(e)}"
+            )
+
     def smart_resize(self,
                      input_path: Union[str, Path],
                      output_path: Optional[Union[str, Path]] = None,
@@ -919,6 +1054,26 @@ def quick_resize(input_path: str, width: int = None, height: int = None,
     """Quick function to resize an image."""
     editor = PhotoEditor()
     result = editor.smart_resize(input_path, output_path, width=width, height=height)
+    if result.success:
+        return result.output_path
+    raise RuntimeError(result.message)
+
+
+def quick_remove_watermark(input_path: str, output_path: Optional[str] = None,
+                           position: str = "bottom-right") -> str:
+    """
+    Quick function to remove watermark from image.
+
+    Args:
+        input_path: Path to input image
+        output_path: Path for output (optional)
+        position: Watermark position - "bottom-right" (Gemini), "bottom-left", etc.
+
+    Returns:
+        Path to output file
+    """
+    editor = PhotoEditor()
+    result = editor.remove_watermark(input_path, output_path, watermark_position=position)
     if result.success:
         return result.output_path
     raise RuntimeError(result.message)

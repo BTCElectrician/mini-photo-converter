@@ -34,6 +34,9 @@ torchvision>=0.15.0
 # Raster to vector conversion (Rust-based, fast)
 vtracer>=0.6.0
 
+# AI-powered inpainting for watermark removal (LaMa model)
+simple-lama-inpainting>=0.1.0
+
 # Folder watching for auto-processing
 watchdog>=3.0.0
 
