@@ -362,13 +362,8 @@ mini-photo-converter/
 ├── drop_watcher.py          # Auto-processing folder watcher
 ├── smart_cli.py             # Natural language CLI (interactive mode)
 ├── requirements.txt         # Dependencies
-├── README.md                # This file
-│
-├── # Legacy scripts (still functional)
-├── optimize_images.py       # Basic image optimization
-├── create_banner.py         # Twitter banner creation
-├── create_letterbox_banner.py
-├── reduced_background_images.py
+├── AGENTS.md                # AI assistant documentation
+├── CLAUDE.md                # Claude Code quick reference
 │
 └── output/                  # All outputs organized by type
     ├── social/              # Social media formats
@@ -534,17 +529,6 @@ class VectorMode(Enum):
     LOGO = "logo"                # Best for logos
     PIXEL_ART = "pixel_art"      # Best for pixel art
 ```
-
-## Legacy Scripts
-
-The original scripts are still available and functional:
-
-| Script | Purpose |
-|--------|---------|
-| `optimize_images.py` | Resize PNGs to 256x256 with optimization |
-| `create_banner.py` | Create Twitter banners (1500x500) |
-| `create_letterbox_banner.py` | Create letterbox banners |
-| `reduced_background_images.py` | Compress images to <200KB |
 
 ## Contributing
 
