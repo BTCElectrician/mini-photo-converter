@@ -2,6 +2,31 @@
 
 A modern, AI-powered photo editing toolkit for web and mobile apps. Process AI-generated images with background removal, **AI upscaling**, vectorization, and perfect resizing - all in one place.
 
+## Simple CLI - Works with Any AI Assistant
+
+**One command for everything.** Use from Claude, Codex, Cursor, or any CLI:
+
+```bash
+# Setup (adds 'photo' to your PATH)
+./setup.sh && source ~/.zshrc
+
+# Now use simple commands anywhere:
+photo banner image.png          # Create a Twitter banner
+photo button logo.png           # Create a button
+photo postcard vacation.png     # Create a print-ready postcard
+photo flyer promo.png           # Create a flyer
+
+photo upscale small_art.png     # AI upscale 4x (Real-ESRGAN)
+photo upscale art.png 2         # AI upscale 2x
+photo rembg portrait.jpg        # Remove background
+photo vector logo.png           # Convert to SVG
+
+photo resize image.png 800 600  # Resize to exact dimensions
+photo list                      # Show all 30+ format presets
+```
+
+**All outputs saved to `./output/` organized by type.**
+
 ## Features
 
 ### AI-Powered Image Upscaling (Real-ESRGAN)
@@ -328,8 +353,14 @@ Options:
 
 ```
 mini-photo-converter/
-├── photo_editor.py          # Main photo editor module
+├── photo                    # Simple CLI (works with any AI assistant)
+├── setup.sh                 # Setup script (adds 'photo' to PATH)
+├── photo_editor.py          # Core photo editor module
+├── format_converter.py      # Format conversion (banner, button, etc.)
+├── presets.py               # 30+ format preset definitions
+├── api_server.py            # REST API server
 ├── drop_watcher.py          # Auto-processing folder watcher
+├── smart_cli.py             # Natural language CLI (interactive mode)
 ├── requirements.txt         # Dependencies
 ├── README.md                # This file
 │
@@ -339,14 +370,13 @@ mini-photo-converter/
 ├── create_letterbox_banner.py
 ├── reduced_background_images.py
 │
-└── # Output directories (created automatically)
-    ├── drop/                # Drop folder for watcher
-    └── processed/           # Processed output
-        └── image_name/
-            ├── image_name_nobg.png
-            ├── image_name.svg
-            ├── image_name_512.png
-            └── image_name_1024.png
+└── output/                  # All outputs organized by type
+    ├── social/              # Social media formats
+    ├── print/               # Print formats (postcards, flyers)
+    ├── web/                 # Web formats (buttons, icons)
+    ├── upscaled/            # AI-upscaled images
+    ├── no_background/       # Background-removed images
+    └── vectors/             # SVG vector files
 ```
 
 ## Installation
