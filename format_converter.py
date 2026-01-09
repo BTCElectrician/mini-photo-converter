@@ -89,7 +89,9 @@ class FormatConverter:
         input_path: Union[str, Path],
         preset_name: str,
         output_path: Optional[Union[str, Path]] = None,
-        upscale_if_needed: bool = True
+        upscale_if_needed: bool = True,
+        fit_mode_override: Optional[FitMode] = None,
+        background_color: Optional[Tuple[int, int, int]] = None
     ) -> ConversionResult:
         """
         Convert an image to a specific preset format.
@@ -99,6 +101,8 @@ class FormatConverter:
             preset_name: Name of the preset (e.g., "banner", "postcard")
             output_path: Optional custom output path
             upscale_if_needed: If True, upscale small images to fit
+            fit_mode_override: Override the preset's fit mode (e.g., FitMode.FIT for letterbox)
+            background_color: Override background color for letterbox mode
 
         Returns:
             ConversionResult with details
@@ -116,11 +120,23 @@ class FormatConverter:
                 message=f"Unknown preset: {preset_name}. Use --list to see available presets."
             )
 
+        # Apply overrides if provided
+        if fit_mode_override is not None:
+            # Create a modified preset with the new fit mode
+            from dataclasses import replace
+            preset = replace(preset, fit_mode=fit_mode_override)
+            if background_color is not None:
+                preset = replace(preset, background_color=background_color)
+
         # Determine output path
+        suffix = preset.suffix
+        if fit_mode_override == FitMode.FIT:
+            suffix = f"{preset.suffix}_fit"
+
         if output_path is None:
             output_dir = self.output_base / preset.output_folder
             output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = output_dir / f"{input_path.stem}{preset.suffix}.png"
+            output_path = output_dir / f"{input_path.stem}{suffix}.png"
         else:
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)

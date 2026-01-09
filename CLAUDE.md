@@ -26,6 +26,7 @@ photo list                  # Show all presets
 | User says... | Run this |
 |--------------|----------|
 | "make a banner" | `photo banner <image>` |
+| "make a banner but keep the whole image" | `photo banner <image> --fit` |
 | "create a button" | `photo button <image>` |
 | "make it bigger" / "upscale" | `photo upscale <image>` |
 | "remove background" | `photo rembg <image>` |
