@@ -97,6 +97,15 @@ def main():
         print(f"Resizing {image_path} to {width}x{height}...")
         result = editor.smart_resize(input_path, output_path, width=width, height=height)
 
+    elif command in ['watermark', 'nowm', 'rmwm', 'dewatermark']:
+        # Remove watermark (default: bottom-right for Gemini)
+        position = sys.argv[3] if len(sys.argv) > 3 else "bottom-right"
+        output_dir = Path("output/no_watermark")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{input_path.stem}_nowm.png"
+        print(f"Removing watermark from {image_path} ({position})...")
+        result = editor.remove_watermark(input_path, output_path, watermark_position=position)
+
     elif command in ALL_PRESETS:
         # Direct preset name
         print(f"Converting {image_path} to {command}...")
@@ -169,6 +178,7 @@ COMMANDS:
     photo upscale image.png         AI upscale 4x (Real-ESRGAN)
     photo upscale image.png 2       AI upscale 2x
     photo rembg image.png           Remove background (AI)
+    photo watermark image.png       Remove watermark (AI inpainting)
     photo vector image.png          Convert to SVG
 
     photo resize image.png 800 600  Resize to exact dimensions
