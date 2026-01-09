@@ -187,6 +187,75 @@ from photo_editor import quick_remove_bg, quick_vectorize, quick_resize, quick_u
 quick_upscale("gemini_art.png")        # -> gemini_art_upscaled_4x.png (THE MAGIC!)
 quick_upscale("anime.png", model="anime")  # Use anime model
 quick_remove_bg("photo.png")           # -> photo_nobg.png
+
+### REST API - For Web & Mobile Apps
+
+Start the API server and call from any language/platform:
+
+```bash
+# Start the server
+python api_server.py
+
+# Server runs at http://localhost:8000
+# Interactive docs at http://localhost:8000/docs
+```
+
+**API Endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/upscale` | POST | AI upscale image (Real-ESRGAN) |
+| `/remove-bg` | POST | Remove background |
+| `/vectorize` | POST | Convert to SVG |
+| `/resize` | POST | Smart resize |
+| `/convert/{preset}` | POST | Convert to preset (banner, postcard, etc.) |
+| `/pipeline` | POST | Full processing pipeline |
+| `/presets` | GET | List all available presets |
+| `/batch/convert` | POST | Batch convert multiple images |
+
+**Example - cURL:**
+```bash
+# Upscale an image 4x
+curl -X POST "http://localhost:8000/upscale?scale=4&model=anime" \
+  -F "file=@my_art.png" -o upscaled.png
+
+# Remove background
+curl -X POST "http://localhost:8000/remove-bg" \
+  -F "file=@photo.jpg" -o nobg.png
+
+# Convert to Twitter banner
+curl -X POST "http://localhost:8000/convert/banner" \
+  -F "file=@image.png" -o banner.png
+```
+
+**Example - JavaScript/Fetch:**
+```javascript
+// Upscale an image
+const formData = new FormData();
+formData.append('file', imageFile);
+
+const response = await fetch('http://localhost:8000/upscale?scale=4', {
+  method: 'POST',
+  body: formData
+});
+
+const blob = await response.blob();
+const url = URL.createObjectURL(blob);
+```
+
+**Example - Python Requests:**
+```python
+import requests
+
+# Remove background
+with open("photo.jpg", "rb") as f:
+    response = requests.post(
+        "http://localhost:8000/remove-bg",
+        files={"file": f}
+    )
+
+with open("nobg.png", "wb") as f:
+    f.write(response.content)
 quick_vectorize("logo.png")            # -> logo.svg
 quick_resize("image.png", width=512)   # -> image_resized.png
 ```
