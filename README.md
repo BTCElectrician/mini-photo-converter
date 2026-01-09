@@ -57,6 +57,73 @@ python photo_editor.py image.png --resize 1024 1024
 
 # Start the drop folder watcher
 python drop_watcher.py
+
+# FORMAT CONVERTER - Make banners, buttons, postcards, etc.
+python format_converter.py image.png banner
+python format_converter.py image.png postcard flyer icon
+python format_converter.py --list  # See all presets
+```
+
+## Format Converter - "Make This a Banner/Button/Postcard"
+
+Convert your AI-generated images to any format with one command:
+
+```bash
+# Single format
+python format_converter.py my_art.png banner
+
+# Multiple formats at once
+python format_converter.py logo.png icon favicon app_icon button
+
+# All social media sizes
+python format_converter.py promo.png --all-social
+
+# All print sizes (postcards, flyers, posters)
+python format_converter.py artwork.png --all-print
+
+# Custom size
+python format_converter.py image.png --custom 800x600
+
+# List all available presets
+python format_converter.py --list
+```
+
+### Available Presets
+
+| Shortcut | Format | Size | Use Case |
+|----------|--------|------|----------|
+| `banner` | Twitter Banner | 1500x500 | Social media header |
+| `button` | Button Medium | 200x60 | Web buttons |
+| `icon` | Icon | 256x256 | App/web icons |
+| `thumbnail` | Thumbnail | 300x300 | Preview images |
+| `postcard` | Postcard 6x4 | 1800x1200 | Print postcards |
+| `flyer` | Flyer Letter | 2550x3300 | Print flyers |
+| `poster` | Poster 11x17 | 3300x5100 | Print posters |
+| `hero` | Hero Image | 1920x1080 | Website heroes |
+
+**Social Media**: `twitter_banner`, `twitter_post`, `instagram`, `instagram_story`, `facebook_cover`, `linkedin_banner`, `youtube_thumbnail`
+
+**Print (300 DPI)**: `postcard`, `postcard_5x7`, `flyer`, `flyer_a4`, `business_card`, `poster`, `poster_18x24`
+
+**Web/App**: `button_small`, `button_large`, `icon_64`, `icon_128`, `icon_512`, `app_icon`, `favicon`, `hero`, `og_image`
+
+### Output Organization
+
+```
+output/
+├── social/
+│   ├── twitter/
+│   │   └── image_twitter_banner.png
+│   ├── instagram/
+│   └── facebook/
+├── print/
+│   ├── postcards/
+│   ├── flyers/
+│   └── posters/
+└── web/
+    ├── buttons/
+    ├── icons/
+    └── thumbnails/
 ```
 
 ## Usage Examples
