@@ -76,6 +76,10 @@ output/
 drop/
 processed/
 
+# Model weights
+*.pth
+gfpgan/weights/
+
 # Large image files
 *.png
 *.jpg
