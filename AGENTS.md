@@ -26,6 +26,8 @@ photo youtube <image>       # YouTube thumbnail (1280x720)
 photo upscale <image>       # AI upscale 4x (Real-ESRGAN)
 photo upscale <image> 2     # AI upscale 2x
 photo rembg <image>         # Remove background (AI)
+photo watermark <image>              # Remove Gemini watermark (bottom-right)
+photo watermark <image> <position>   # Remove watermark from position
 photo vector <image>        # Convert to SVG
 
 # UTILITIES
@@ -44,6 +46,7 @@ output/
 ├── web/             # Web formats (buttons/, icons/, thumbnails/)
 ├── upscaled/        # AI-upscaled images
 ├── no_background/   # Background-removed images
+├── no_watermark/    # Watermark-removed images
 └── vectors/         # SVG files
 ```
 
@@ -72,6 +75,25 @@ photo upscale small_image.png
 photo rembg photo.jpg
 # Output: output/no_background/photo_nobg.png (transparent PNG)
 ```
+
+### "Remove watermark" / "Remove Gemini watermark"
+
+> **CRITICAL: Install LaMa first!** Without LaMa, watermark removal falls back to OpenCV inpainting which produces blurry, low-quality results. Always ensure LaMa is installed before running:
+> ```bash
+> pip install simple-lama-inpainting opencv-python
+> ```
+
+```bash
+photo watermark gemini_image.png
+# Output: output/no_watermark/gemini_image_nowm.png (bottom-right removed)
+
+photo watermark image.png bottom-left
+# Output: output/no_watermark/image_nowm.png (bottom-left removed)
+```
+
+**Watermark positions:** `bottom-right` (default), `bottom-left`, `top-right`, `top-left`, `bottom-center`
+
+**How to verify LaMa is working:** When you run the command, look for `[LaMa] Inpainting model loaded` in the output. If you see `[LaMa] Not available, using OpenCV inpainting fallback`, the result will be blurry - install LaMa and retry.
 
 ### "Convert to vector/SVG"
 ```bash
@@ -276,3 +298,4 @@ photo banner nonexistent.png
 4. **AI operations download models on first use** (~170MB for rembg, ~64MB per Real-ESRGAN model)
 5. **For batch operations**, use `format_converter.py` instead of multiple `photo` calls
 6. **The `photo` command is stateless** - each call is independent
+7. **WATERMARK REMOVAL: Install LaMa first!** Run `pip install simple-lama-inpainting opencv-python` before using `photo watermark`. Without LaMa, it falls back to OpenCV which produces blurry results. Check output for `[LaMa] Inpainting model loaded` to confirm it's working.

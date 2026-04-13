@@ -15,7 +15,8 @@ photo icon image.png        # App icon (256x256)
 
 photo upscale image.png     # AI upscale 4x
 photo rembg image.png       # Remove background
-photo watermark image.png   # Remove Gemini watermark (AI)
+photo watermark image.png              # Remove Gemini watermark (bottom-right)
+photo watermark image.png bottom-left  # Different position
 photo vector image.png      # Convert to SVG
 
 photo list                  # Show all presets
@@ -30,14 +31,24 @@ photo list                  # Show all presets
 | "create a button" | `photo button <image>` |
 | "make it bigger" / "upscale" | `photo upscale <image>` |
 | "remove background" | `photo rembg <image>` |
-| "remove watermark" / "remove Gemini watermark" | `photo watermark <image>` |
+| "remove watermark" / "remove Gemini watermark" | **Install LaMa first:** `pip install simple-lama-inpainting opencv-python`, then `photo watermark <image>` |
+| "remove watermark from bottom-left" | `photo watermark <image> bottom-left` |
+
+> **IMPORTANT:** Watermark removal requires LaMa for quality results. Without it, you get blurry output. Run `pip install simple-lama-inpainting opencv-python` before using `photo watermark`. Verify with output showing `[LaMa] Inpainting model loaded`.
 | "make it a vector" / "SVG" | `photo vector <image>` |
 | "postcard" / "print" | `photo postcard <image>` |
 | "social media sizes" | `python format_converter.py <image> --all-social` |
 
 ## Output Location
 
-All outputs go to `./output/` folder, organized by type.
+All outputs go to `./output/` folder, organized by type:
+- `output/no_watermark/` - Watermark-removed images
+- `output/no_background/` - Background-removed images
+- `output/upscaled/` - AI-upscaled images
+- `output/vectors/` - SVG files
+- `output/social/` - Social media formats
+- `output/print/` - Print formats
+- `output/web/` - Web formats
 
 ## Key Files
 

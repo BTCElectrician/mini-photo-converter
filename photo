@@ -105,13 +105,57 @@ def main():
         result = editor.smart_resize(input_path, output_path, width=width, height=height)
 
     elif command in ['watermark', 'nowm', 'rmwm', 'dewatermark']:
-        # Remove watermark (default: bottom-right for Gemini)
-        position = sys.argv[3] if len(sys.argv) > 3 else "bottom-right"
+        # Corner edit (LaMa): default mask is SMALL so detail (e.g. hands) in the
+        # corner is not destroyed. Pass explicit h w [padding] for a larger region.
+        # Usage:
+        #   photo watermark <img>
+        #   photo watermark <img> <position>
+        #   photo watermark <img> <position> <h> <w> [padding]
+        tokens = sys.argv[3:]
+        position = "bottom-right"
+        wm_h: int | None = None
+        wm_w: int | None = None
+        padding: int | None = None
+        i = 0
+        if i < len(tokens) and tokens[i] in (
+            "bottom-right",
+            "bottom-left",
+            "top-right",
+            "top-left",
+            "bottom-center",
+        ):
+            position = tokens[i]
+            i += 1
+        if i < len(tokens) and tokens[i].isdigit():
+            wm_h = int(tokens[i])
+            i += 1
+        if i < len(tokens) and tokens[i].isdigit():
+            wm_w = int(tokens[i])
+            i += 1
+        if i < len(tokens) and tokens[i].isdigit():
+            padding = int(tokens[i])
+            i += 1
+        if wm_h is not None and wm_w is None:
+            wm_w = wm_h
+        # Safe defaults for a small corner mark (~sparkle); override if needed.
+        if wm_h is None:
+            wm_h = 28
+        if wm_w is None:
+            wm_w = 36
+        if padding is None:
+            padding = 8
         output_dir = Path("output/no_watermark")
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{input_path.stem}_nowm.png"
-        print(f"Removing watermark from {image_path} ({position})...")
-        result = editor.remove_watermark(input_path, output_path, watermark_position=position)
+        print(f"Editing corner of {image_path} ({position}, mask ~{wm_w}x{wm_h}+pad {padding})...")
+        result = editor.remove_watermark(
+            input_path,
+            output_path,
+            watermark_position=position,
+            watermark_height=wm_h,
+            watermark_width=wm_w,
+            padding=padding,
+        )
 
     elif command in ALL_PRESETS:
         # Direct preset name
@@ -187,7 +231,9 @@ COMMANDS:
     photo upscale image.png         AI upscale 4x (Real-ESRGAN)
     photo upscale image.png 2       AI upscale 2x
     photo rembg image.png           Remove background (AI)
-    photo watermark image.png       Remove watermark (AI inpainting)
+    photo watermark image.png       Edit bottom-right corner (small mask; LaMa)
+    photo watermark image.png <pos> Same, other corner / bottom-center
+    photo watermark img.png bottom-right 200 50 10   Large corner region (optional)
     photo vector image.png          Convert to SVG
 
     photo resize image.png 800 600  Resize to exact dimensions
@@ -213,6 +259,13 @@ EXAMPLES:
     photo upscale ai_art.png        # Upscale small AI image
     photo rembg portrait.jpg        # Remove background
     photo thumbnail art.png --fit   # Thumbnail with letterbox
+    photo watermark gemini.png       # Small bottom-right corner edit
+    photo watermark image.png bottom-left
+    photo watermark wide.png bottom-right 220 60 12  # Bigger region when needed
+    photo postcard vacation.png     # Print-ready postcard
+
+WATERMARK POSITIONS:
+    bottom-right (default), bottom-left, top-right, top-left, bottom-center
 """)
 
 

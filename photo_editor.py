@@ -73,6 +73,14 @@ def _get_realesrgan(model_name: str = "RealESRGAN_x4plus", scale: int = 4, denoi
         _realesrgan = {}
 
     if cache_key not in _realesrgan:
+        # Compatibility shim for newer torchvision (removed functional_tensor module)
+        import sys
+        import torchvision.transforms.functional as _F
+        if 'torchvision.transforms.functional_tensor' not in sys.modules:
+            class _FunctionalTensorShim:
+                rgb_to_grayscale = _F.rgb_to_grayscale
+            sys.modules['torchvision.transforms.functional_tensor'] = _FunctionalTensorShim()
+        
         from realesrgan import RealESRGANer
         from basicsr.archs.rrdbnet_arch import RRDBNet
         import torch
