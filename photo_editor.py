@@ -1,152 +1,71 @@
 """
-SuperCharged Photo Editor - AI-Powered Image Processing
+Photo Editor - AI-powered image processing.
 
-A modern photo editing toolkit for web and mobile apps featuring:
-- AI-powered background removal (rembg with U2-Net)
-- AI-powered upscaling (Real-ESRGAN) - upscale 2x-4x WITHOUT losing quality!
+Features:
+- Background removal (rembg / U2-Net)
+- AI upscaling 2x-4x (Real-ESRGAN)
+- Watermark removal via inpainting (LaMa, with OpenCV fallback)
 - Raster to vector conversion (vtracer)
 - Smart resizing with multiple algorithms
-- Batch processing with folder watching
-- Perfect for processing AI-generated images
+- Full pipeline and batch processing
+
+Heavy AI libraries are imported lazily, so importing this module is cheap
+and each feature only pays for what it uses.
 
 Usage:
     from photo_editor import PhotoEditor
 
     editor = PhotoEditor()
     editor.remove_background("input.png", "output.png")
-    editor.ai_upscale("small.png", "large.png", scale=4)  # 4x upscale!
+    editor.ai_upscale("small.png", "large.png", scale=4)
     editor.vectorize("input.png", "output.svg")
-    editor.smart_resize("input.png", "output.png", width=1024, height=1024)
-    editor.process_full_pipeline("input.png", "output_dir/")
+    editor.smart_resize("input.png", "output.png", width=1024)
 """
 
-import os
+import functools
 import io
-import shutil
-from pathlib import Path
-from typing import Optional, Tuple, Union, List
+import os
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
+from typing import Union
 
-from PIL import Image
 import numpy as np
+from PIL import Image
 
-# Lazy imports for heavy libraries
+PathLike = Union[str, Path]
+
+
+# ============================================================================
+# Lazy loaders for heavy AI libraries
+# ============================================================================
+
 _rembg = None
 _vtracer = None
 _cv2 = None
-_realesrgan = None
 _lama = None
+_upscalers: dict[tuple, object] = {}
 
-
-def _get_lama():
-    """Lazy load LaMa inpainting model for watermark removal."""
-    global _lama
-    if _lama is None:
-        try:
-            from simple_lama_inpainting import SimpleLama
-            _lama = SimpleLama()
-            print("[LaMa] Inpainting model loaded")
-        except ImportError:
-            # Fallback to OpenCV inpainting if LaMa not available
-            print("[LaMa] Not available, using OpenCV inpainting fallback")
-            _lama = "opencv_fallback"
-    return _lama
-
-
-def _get_realesrgan(model_name: str = "RealESRGAN_x4plus", scale: int = 4, denoise_strength: float = 0.5):
-    """
-    Lazy load Real-ESRGAN upscaler.
-
-    Models available:
-    - RealESRGAN_x4plus: Best quality for general images (4x)
-    - RealESRGAN_x4plus_anime_6B: Optimized for anime/illustrations (4x)
-    - RealESRGAN_x2plus: 2x upscaling
-    - realesr-general-x4v3: Fast general purpose (4x)
-    """
-    global _realesrgan
-
-    # Cache key based on model and scale
-    cache_key = f"{model_name}_{scale}"
-
-    if _realesrgan is None:
-        _realesrgan = {}
-
-    if cache_key not in _realesrgan:
-        # Compatibility shim for newer torchvision (removed functional_tensor module)
-        import sys
-        import torchvision.transforms.functional as _F
-        if 'torchvision.transforms.functional_tensor' not in sys.modules:
-            class _FunctionalTensorShim:
-                rgb_to_grayscale = _F.rgb_to_grayscale
-            sys.modules['torchvision.transforms.functional_tensor'] = _FunctionalTensorShim()
-        
-        from realesrgan import RealESRGANer
-        from basicsr.archs.rrdbnet_arch import RRDBNet
-        import torch
-
-        # Determine best available device
-        # Priority: CUDA (NVIDIA) > MPS (Apple Silicon) > CPU
-        if torch.cuda.is_available():
-            device = 'cuda'
-            half_precision = True  # FP16 works great on NVIDIA
-        elif torch.backends.mps.is_available():
-            device = 'mps'  # Apple Silicon GPU (M1/M2/M3)
-            half_precision = False  # MPS doesn't support FP16 well yet
-        else:
-            device = 'cpu'
-            half_precision = False
-
-        print(f"[Real-ESRGAN] Using device: {device}")
-
-        # Model configurations
-        if model_name == 'RealESRGAN_x4plus':
-            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-            netscale = 4
-            model_url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
-        elif model_name == 'RealESRGAN_x4plus_anime_6B':
-            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
-            netscale = 4
-            model_url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth'
-        elif model_name == 'RealESRGAN_x2plus':
-            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
-            netscale = 2
-            model_url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth'
-        else:
-            # Default to x4plus
-            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-            netscale = 4
-            model_url = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
-
-        # Create upscaler
-        upscaler = RealESRGANer(
-            scale=netscale,
-            model_path=model_url,
-            dni_weight=denoise_strength,
-            model=model,
-            tile=0,  # 0 for no tiling, or set to 256/512 for large images
-            tile_pad=10,
-            pre_pad=0,
-            half=half_precision,
-            device=device
-        )
-
-        _realesrgan[cache_key] = upscaler
-
-    return _realesrgan[cache_key]
+# Real-ESRGAN model architectures: name -> (num_block, scale, weights URL)
+_ESRGAN_RELEASES = "https://github.com/xinntao/Real-ESRGAN/releases/download"
+_ESRGAN_MODELS = {
+    "RealESRGAN_x4plus": (23, 4, f"{_ESRGAN_RELEASES}/v0.1.0/RealESRGAN_x4plus.pth"),
+    "RealESRGAN_x4plus_anime_6B": (6, 4, f"{_ESRGAN_RELEASES}/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"),
+    "RealESRGAN_x2plus": (23, 2, f"{_ESRGAN_RELEASES}/v0.2.1/RealESRGAN_x2plus.pth"),
+}
 
 
 def _get_rembg():
-    """Lazy load rembg to speed up initial import."""
+    """Load rembg on first use."""
     global _rembg
     if _rembg is None:
-        from rembg import remove, new_session
+        from rembg import new_session, remove
         _rembg = {"remove": remove, "new_session": new_session}
     return _rembg
 
 
 def _get_vtracer():
-    """Lazy load vtracer for vectorization."""
+    """Load vtracer on first use."""
     global _vtracer
     if _vtracer is None:
         import vtracer
@@ -155,7 +74,7 @@ def _get_vtracer():
 
 
 def _get_cv2():
-    """Lazy load OpenCV."""
+    """Load OpenCV on first use."""
     global _cv2
     if _cv2 is None:
         import cv2
@@ -163,335 +82,400 @@ def _get_cv2():
     return _cv2
 
 
+def _get_lama():
+    """Load the LaMa inpainting model, or fall back to OpenCV inpainting."""
+    global _lama
+    if _lama is None:
+        try:
+            from simple_lama_inpainting import SimpleLama
+            _lama = SimpleLama()
+            print("[LaMa] Inpainting model loaded")
+        except ImportError:
+            print("[LaMa] Not available, using OpenCV inpainting fallback")
+            _lama = "opencv_fallback"
+    return _lama
+
+
+def _shim_torchvision():
+    """Newer torchvision dropped functional_tensor; basicsr still imports it."""
+    import sys
+
+    if "torchvision.transforms.functional_tensor" in sys.modules:
+        return
+    import torchvision.transforms.functional as functional
+
+    class _FunctionalTensorShim:
+        rgb_to_grayscale = functional.rgb_to_grayscale
+
+    sys.modules["torchvision.transforms.functional_tensor"] = _FunctionalTensorShim()
+
+
+def _pick_device() -> tuple[str, bool]:
+    """Best available torch device and whether FP16 is safe on it."""
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda", True
+    if torch.backends.mps.is_available():
+        return "mps", False  # MPS FP16 support is still unreliable
+    return "cpu", False
+
+
+def _get_upscaler(model_name: str, denoise_strength: float):
+    """Build (and cache) a Real-ESRGAN upscaler for the given model."""
+    cache_key = (model_name, denoise_strength)
+    if cache_key in _upscalers:
+        return _upscalers[cache_key]
+
+    _shim_torchvision()
+    try:
+        from basicsr.archs.rrdbnet_arch import RRDBNet
+        from realesrgan import RealESRGANer
+    except ImportError as e:
+        raise RuntimeError(
+            f"Real-ESRGAN not installed. Run: pip install realesrgan basicsr ({e})"
+        ) from e
+
+    device, half_precision = _pick_device()
+    print(f"[Real-ESRGAN] Using device: {device}")
+
+    num_block, netscale, model_url = _ESRGAN_MODELS.get(
+        model_name, _ESRGAN_MODELS["RealESRGAN_x4plus"]
+    )
+    upscaler = RealESRGANer(
+        scale=netscale,
+        model_path=model_url,
+        dni_weight=denoise_strength,
+        model=RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64,
+                      num_block=num_block, num_grow_ch=32, scale=netscale),
+        tile=0,
+        tile_pad=10,
+        pre_pad=0,
+        half=half_precision,
+        device=device,
+    )
+    _upscalers[cache_key] = upscaler
+    return upscaler
+
+
+# ============================================================================
+# Options and results
+# ============================================================================
+
 class ResizeMode(Enum):
     """Resize algorithm options."""
-    LANCZOS = "lanczos"      # Best for downscaling, sharp results
-    BICUBIC = "bicubic"      # Good balance of quality and speed
-    BILINEAR = "bilinear"    # Fast, good for real-time
-    NEAREST = "nearest"      # Pixel-perfect, good for pixel art
-    SUPERRES = "superres"    # Basic super resolution (OpenCV)
+
+    LANCZOS = "lanczos"    # Best for downscaling, sharp results
+    BICUBIC = "bicubic"    # Good balance of quality and speed
+    BILINEAR = "bilinear"  # Fast, good for real-time
+    NEAREST = "nearest"    # Pixel-perfect, good for pixel art
+    SUPERRES = "superres"  # OpenCV cubic interpolation
 
 
 class UpscaleModel(Enum):
     """AI upscaling model options (Real-ESRGAN)."""
-    GENERAL_X4 = "RealESRGAN_x4plus"           # Best quality, 4x upscale
-    GENERAL_X2 = "RealESRGAN_x2plus"           # 2x upscale
-    ANIME_X4 = "RealESRGAN_x4plus_anime_6B"    # Optimized for anime/illustrations
-    FAST_X4 = "realesr-general-x4v3"           # Faster, good quality
+
+    GENERAL_X4 = "RealESRGAN_x4plus"         # Best quality, 4x
+    GENERAL_X2 = "RealESRGAN_x2plus"         # 2x
+    ANIME_X4 = "RealESRGAN_x4plus_anime_6B"  # Anime / illustrations, 4x
+    FAST_X4 = "realesr-general-x4v3"         # Faster, good quality, 4x
+
+    @classmethod
+    def from_name(cls, name: str, scale: int = 4) -> "UpscaleModel":
+        """Resolve a friendly name ("general", "anime", "fast") and scale."""
+        special = {"anime": cls.ANIME_X4, "fast": cls.FAST_X4}
+        if name in special:
+            return special[name]
+        return cls.GENERAL_X2 if scale == 2 else cls.GENERAL_X4
+
+    @property
+    def scale(self) -> int:
+        return 2 if self is UpscaleModel.GENERAL_X2 else 4
 
 
 class VectorMode(Enum):
     """Vectorization style presets."""
-    PHOTO = "photo"          # Best for photographs
-    ILLUSTRATION = "illustration"  # Best for illustrations/graphics
-    LOGO = "logo"            # Best for logos, simple shapes
-    PIXEL_ART = "pixel_art"  # Best for pixel art
+
+    PHOTO = "photo"
+    ILLUSTRATION = "illustration"
+    LOGO = "logo"
+    PIXEL_ART = "pixel_art"
+
+
+# vtracer parameter overrides per vectorization style
+_VECTOR_STYLE_OVERRIDES = {
+    VectorMode.LOGO: {"filter_speckle": 8, "color_precision": 4, "corner_threshold": 90},
+    VectorMode.PIXEL_ART: {"filter_speckle": 0, "color_precision": 8,
+                           "corner_threshold": 0, "length_threshold": 0},
+    VectorMode.PHOTO: {"filter_speckle": 2, "color_precision": 8, "layer_difference": 8},
+}
+
+_RESAMPLING = {
+    ResizeMode.LANCZOS: Image.Resampling.LANCZOS,
+    ResizeMode.BICUBIC: Image.Resampling.BICUBIC,
+    ResizeMode.BILINEAR: Image.Resampling.BILINEAR,
+    ResizeMode.NEAREST: Image.Resampling.NEAREST,
+}
 
 
 @dataclass
 class ProcessingResult:
     """Result of an image processing operation."""
+
     success: bool
     input_path: str
-    output_path: Optional[str]
+    output_path: str | None
     operation: str
     message: str
-    original_size: Optional[Tuple[int, int]] = None
-    output_size: Optional[Tuple[int, int]] = None
-    file_size_before: Optional[int] = None
-    file_size_after: Optional[int] = None
+    original_size: tuple[int, int] | None = None
+    output_size: tuple[int, int] | None = None
+    file_size_before: int | None = None
+    file_size_after: int | None = None
 
+
+def _operation(name: str):
+    """Turn any exception in a PhotoEditor method into a failure result."""
+    def decorator(method):
+        @functools.wraps(method)
+        def wrapper(self, input_path: PathLike, *args, **kwargs):
+            try:
+                return method(self, Path(input_path), *args, **kwargs)
+            except Exception as e:
+                return ProcessingResult(
+                    success=False, input_path=str(input_path), output_path=None,
+                    operation=name, message=f"Error: {e}",
+                )
+        return wrapper
+    return decorator
+
+
+# ============================================================================
+# Image helpers
+# ============================================================================
+
+def _flatten_to_rgb(img: Image.Image) -> Image.Image:
+    """Composite an RGBA image onto a white background (for JPEG output)."""
+    background = Image.new("RGB", img.size, (255, 255, 255))
+    background.paste(img, mask=img.getchannel("A"))
+    return background
+
+
+def _save_image(img: Image.Image, path: Path,
+                output_format: str | None = None, quality: int = 95) -> Image.Image:
+    """Save an image, inferring format from the path unless given explicitly.
+
+    Handles JPG->JPEG aliasing, lossy quality, and alpha flattening for JPEG.
+    Returns the image actually saved (flattened if needed).
+    """
+    fmt = (output_format or path.suffix.lstrip(".") or "png").upper()
+    if fmt == "JPG":
+        fmt = "JPEG"
+
+    save_kwargs = {"optimize": True}
+    if fmt in ("JPEG", "WEBP"):
+        save_kwargs["quality"] = quality
+        if fmt == "JPEG" and img.mode == "RGBA":
+            img = _flatten_to_rgb(img)
+
+    img.save(path, format=fmt, **save_kwargs)
+    return img
+
+
+def _watermark_box(position: str, img_width: int, img_height: int,
+                   box_width: int, box_height: int) -> tuple[int, int, int, int]:
+    """Pixel box (x1, y1, x2, y2) for a watermark at a named corner/edge.
+
+    Positions: top/bottom x left/center/right, e.g. "bottom-right" (default
+    for anything unrecognized).
+    """
+    vertical, _, horizontal = position.partition("-")
+    y1 = 0 if vertical == "top" else img_height - box_height
+    if horizontal == "left":
+        x1 = 0
+    elif horizontal == "center":
+        x1 = (img_width - box_width) // 2
+    else:
+        x1 = img_width - box_width
+    return x1, y1, x1 + box_width, y1 + box_height
+
+
+def _target_size(original: tuple[int, int],
+                 width: int | None, height: int | None, scale: float | None,
+                 maintain_aspect: bool, max_size: int | None) -> tuple[int, int]:
+    """Resolve resize parameters into concrete output dimensions."""
+    orig_width, orig_height = original
+
+    if scale is not None:
+        return int(orig_width * scale), int(orig_height * scale)
+    if width is not None and height is not None:
+        if not maintain_aspect:
+            return width, height
+        ratio = min(width / orig_width, height / orig_height)
+        return int(orig_width * ratio), int(orig_height * ratio)
+    if width is not None:
+        return width, int(orig_height * width / orig_width)
+    if height is not None:
+        return int(orig_width * height / orig_height), height
+    if max_size is not None and max(original) > max_size:
+        ratio = max_size / max(original)
+        return int(orig_width * ratio), int(orig_height * ratio)
+    return orig_width, orig_height
+
+
+# ============================================================================
+# PhotoEditor
+# ============================================================================
 
 class PhotoEditor:
-    """
-    SuperCharged Photo Editor with AI-powered capabilities.
+    """AI-powered photo editing toolkit.
 
-    Features:
-    - Background removal using AI (rembg/U2-Net)
-    - AI upscaling with Real-ESRGAN (2x-4x without quality loss!)
-    - Raster to vector conversion (vtracer)
-    - Smart resizing with multiple algorithms
-    - Full processing pipeline for AI-generated images
+    Every operation returns a :class:`ProcessingResult` instead of raising,
+    so batch flows can keep going after individual failures.
 
     Example:
         editor = PhotoEditor()
-
-        # Remove background
         editor.remove_background("photo.png", "photo_nobg.png")
-
-        # AI Upscale (THIS IS THE MAGIC FOR SMALL AI IMAGES!)
-        editor.ai_upscale("small_gemini_art.png", "large_gemini_art.png", scale=4)
-
-        # Vectorize
+        editor.ai_upscale("small_art.png", "large_art.png", scale=4)
         editor.vectorize("logo.png", "logo.svg")
-
-        # Smart resize
-        editor.smart_resize("image.png", "image_resized.png", width=512)
-
-        # Full pipeline: remove bg -> upscale -> vectorize -> resize
         editor.process_full_pipeline("ai_image.png", "output/")
     """
 
-    SUPPORTED_FORMATS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.gif'}
+    SUPPORTED_FORMATS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".gif"}
 
-    def __init__(self,
-                 default_output_dir: str = "processed",
+    def __init__(self, default_output_dir: PathLike = "processed",
                  rembg_model: str = "u2net"):
         """
-        Initialize the PhotoEditor.
-
         Args:
-            default_output_dir: Default directory for output files
-            rembg_model: Model for background removal. Options:
-                - "u2net" (default, best quality)
-                - "u2netp" (faster, slightly lower quality)
-                - "u2net_human_seg" (optimized for humans)
-                - "isnet-general-use" (good general purpose)
-                - "isnet-anime" (optimized for anime)
+            default_output_dir: Default directory for pipeline output.
+            rembg_model: Background removal model - "u2net" (best quality),
+                "u2netp" (faster), "u2net_human_seg" (people),
+                "isnet-general-use", or "isnet-anime".
         """
         self.default_output_dir = Path(default_output_dir)
         self.rembg_model = rembg_model
         self._rembg_session = None
 
-    def _ensure_output_dir(self, output_path: Union[str, Path]) -> Path:
-        """Ensure the output directory exists."""
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        return output_path
+    # -- internal helpers ---------------------------------------------------
 
     def _get_rembg_session(self):
-        """Get or create rembg session for faster batch processing."""
+        """Reuse one rembg session across calls for faster batches."""
         if self._rembg_session is None:
-            rembg = _get_rembg()
-            self._rembg_session = rembg["new_session"](self.rembg_model)
+            self._rembg_session = _get_rembg()["new_session"](self.rembg_model)
         return self._rembg_session
 
-    def remove_background(self,
-                          input_path: Union[str, Path],
-                          output_path: Optional[Union[str, Path]] = None,
+    @staticmethod
+    def _resolve_output(input_path: Path, output_path: PathLike | None,
+                        default_name: str) -> Path:
+        """Pick the output path (next to the input by default) and make its dir."""
+        path = Path(output_path) if output_path else input_path.parent / default_name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _success(operation: str, input_path: Path, output_path: Path, message: str,
+                 original_size: tuple[int, int],
+                 output_size: tuple[int, int]) -> ProcessingResult:
+        return ProcessingResult(
+            success=True,
+            input_path=str(input_path),
+            output_path=str(output_path),
+            operation=operation,
+            message=message,
+            original_size=original_size,
+            output_size=output_size,
+            file_size_before=os.path.getsize(input_path),
+            file_size_after=os.path.getsize(output_path),
+        )
+
+    # -- operations ----------------------------------------------------------
+
+    @_operation("remove_background")
+    def remove_background(self, input_path: Path,
+                          output_path: PathLike | None = None,
                           alpha_matting: bool = False,
                           alpha_matting_foreground_threshold: int = 240,
                           alpha_matting_background_threshold: int = 10,
                           only_mask: bool = False) -> ProcessingResult:
-        """
-        Remove background from an image using AI (rembg/U2-Net).
+        """Remove the background using AI (rembg / U2-Net).
 
         Args:
-            input_path: Path to input image
-            output_path: Path for output image (default: input_nobg.png)
-            alpha_matting: Enable alpha matting for better edges
-            alpha_matting_foreground_threshold: Foreground threshold (0-255)
-            alpha_matting_background_threshold: Background threshold (0-255)
-            only_mask: If True, output only the mask instead of the image
-
-        Returns:
-            ProcessingResult with operation details
+            input_path: Path to input image.
+            output_path: Output path (default: ``<input>_nobg.png``).
+            alpha_matting: Enable alpha matting for better edges.
+            alpha_matting_foreground_threshold: Foreground threshold (0-255).
+            alpha_matting_background_threshold: Background threshold (0-255).
+            only_mask: Output only the mask instead of the image.
         """
-        input_path = Path(input_path)
+        output_path = self._resolve_output(input_path, output_path,
+                                           f"{input_path.stem}_nobg.png")
 
-        if output_path is None:
-            output_path = input_path.parent / f"{input_path.stem}_nobg.png"
-        output_path = self._ensure_output_dir(output_path)
+        original_size = Image.open(input_path).size
+        output_data = _get_rembg()["remove"](
+            input_path.read_bytes(),
+            session=self._get_rembg_session(),
+            alpha_matting=alpha_matting,
+            alpha_matting_foreground_threshold=alpha_matting_foreground_threshold,
+            alpha_matting_background_threshold=alpha_matting_background_threshold,
+            only_mask=only_mask,
+        )
+        output_img = Image.open(io.BytesIO(output_data))
+        output_img.save(output_path, format="PNG", optimize=True)
 
-        try:
-            rembg = _get_rembg()
-            session = self._get_rembg_session()
+        return self._success("remove_background", input_path, output_path,
+                             "Background removed", original_size, output_img.size)
 
-            # Read input image
-            with open(input_path, 'rb') as f:
-                input_data = f.read()
-
-            original_size = os.path.getsize(input_path)
-            img = Image.open(input_path)
-            original_dimensions = img.size
-
-            # Remove background
-            output_data = rembg["remove"](
-                input_data,
-                session=session,
-                alpha_matting=alpha_matting,
-                alpha_matting_foreground_threshold=alpha_matting_foreground_threshold,
-                alpha_matting_background_threshold=alpha_matting_background_threshold,
-                only_mask=only_mask
-            )
-
-            # Save output
-            output_img = Image.open(io.BytesIO(output_data))
-            output_img.save(output_path, format='PNG', optimize=True)
-
-            output_size = os.path.getsize(output_path)
-
-            return ProcessingResult(
-                success=True,
-                input_path=str(input_path),
-                output_path=str(output_path),
-                operation="remove_background",
-                message=f"Background removed successfully",
-                original_size=original_dimensions,
-                output_size=output_img.size,
-                file_size_before=original_size,
-                file_size_after=output_size
-            )
-
-        except Exception as e:
-            return ProcessingResult(
-                success=False,
-                input_path=str(input_path),
-                output_path=None,
-                operation="remove_background",
-                message=f"Error: {str(e)}"
-            )
-
-    def ai_upscale(self,
-                   input_path: Union[str, Path],
-                   output_path: Optional[Union[str, Path]] = None,
+    @_operation("ai_upscale")
+    def ai_upscale(self, input_path: Path,
+                   output_path: PathLike | None = None,
                    scale: int = 4,
                    model: UpscaleModel = UpscaleModel.GENERAL_X4,
                    denoise_strength: float = 0.5,
-                   face_enhance: bool = False,
-                   tile_size: int = 0,
-                   output_format: Optional[str] = None,
+                   output_format: str | None = None,
                    quality: int = 95) -> ProcessingResult:
-        """
-        AI-powered image upscaling using Real-ESRGAN.
+        """AI-upscale an image with Real-ESRGAN - adds detail instead of blur.
 
-        This is the BEST way to upscale AI-generated images (like from Gemini, DALL-E,
-        Midjourney, etc.) without losing quality. The AI actually ADDS detail!
+        Ideal for enlarging small AI-generated images (Gemini, DALL-E,
+        Midjourney, ...). The effective scale comes from the model: 2x for
+        GENERAL_X2, otherwise 4x.
 
         Args:
-            input_path: Path to input image
-            output_path: Path for output image (default: input_upscaled.png)
-            scale: Upscale factor (2 or 4, depending on model)
-            model: Which AI model to use:
-                - GENERAL_X4: Best quality for most images (4x)
-                - GENERAL_X2: 2x upscaling
-                - ANIME_X4: Optimized for anime/illustrations (4x)
-                - FAST_X4: Faster processing, good quality (4x)
-            denoise_strength: Denoise strength (0.0-1.0), higher = more denoising
-            face_enhance: Enable face enhancement (uses GFPGAN)
-            tile_size: Tile size for processing large images (0=auto, or 256/512)
-            output_format: Output format (png, jpg, webp)
-            quality: JPEG/WebP quality (1-100)
-
-        Returns:
-            ProcessingResult with operation details
-
-        Example:
-            # Upscale a small Gemini image 4x
-            editor.ai_upscale("gemini_art_512.png", "gemini_art_2048.png", scale=4)
-
-            # Use anime model for illustrations
-            editor.ai_upscale("anime.png", model=UpscaleModel.ANIME_X4)
-
-            # 2x upscale for less aggressive enlargement
-            editor.ai_upscale("photo.jpg", scale=2, model=UpscaleModel.GENERAL_X2)
+            input_path: Path to input image.
+            output_path: Output path (default: ``<input>_upscaled_<N>x.png``).
+            scale: Requested factor, used for default naming (2 or 4).
+            model: GENERAL_X4, GENERAL_X2, ANIME_X4, or FAST_X4.
+            denoise_strength: 0.0-1.0, higher removes more noise.
+            output_format: png, jpg, or webp (default: from output path).
+            quality: JPEG/WebP quality (1-100).
         """
-        input_path = Path(input_path)
+        scale = model.scale
+        output_path = self._resolve_output(input_path, output_path,
+                                           f"{input_path.stem}_upscaled_{scale}x.png")
 
-        # Determine actual scale based on model
-        if model == UpscaleModel.GENERAL_X2:
-            actual_scale = 2
-        else:
-            actual_scale = 4
+        img = Image.open(input_path)
+        original_size = img.size
+        has_alpha = img.mode == "RGBA"
 
-        if output_path is None:
-            output_path = input_path.parent / f"{input_path.stem}_upscaled_{actual_scale}x.png"
-        output_path = self._ensure_output_dir(output_path)
+        # Real-ESRGAN works on OpenCV-style BGR arrays
+        cv2 = _get_cv2()
+        array = np.array(img if has_alpha else img.convert("RGB"))
+        bgr = cv2.cvtColor(array, cv2.COLOR_RGBA2BGRA if has_alpha else cv2.COLOR_RGB2BGR)
 
-        try:
-            # Load image
-            img = Image.open(input_path)
-            original_size = os.path.getsize(input_path)
-            original_dimensions = img.size
-            orig_width, orig_height = original_dimensions
+        upscaler = _get_upscaler(model.value, denoise_strength)
+        output_bgr, _ = upscaler.enhance(bgr, outscale=scale)
 
-            # Convert to numpy array for Real-ESRGAN
-            if img.mode == 'RGBA':
-                img_array = np.array(img)
-                has_alpha = True
-            else:
-                img_array = np.array(img.convert('RGB'))
-                has_alpha = False
+        rgb = cv2.cvtColor(output_bgr,
+                           cv2.COLOR_BGRA2RGBA if has_alpha else cv2.COLOR_BGR2RGB)
+        output_img = _save_image(Image.fromarray(rgb), output_path,
+                                 output_format, quality)
 
-            # Convert RGB to BGR for OpenCV/Real-ESRGAN
-            cv2 = _get_cv2()
-            if has_alpha:
-                img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGRA)
-            else:
-                img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        message = (f"Upscaled {scale}x: {original_size[0]}x{original_size[1]} -> "
+                   f"{output_img.size[0]}x{output_img.size[1]} ({model.value})")
+        return self._success("ai_upscale", input_path, output_path, message,
+                             original_size, output_img.size)
 
-            # Get upscaler
-            upscaler = _get_realesrgan(model.value, actual_scale, denoise_strength)
-
-            # Upscale!
-            output_bgr, _ = upscaler.enhance(img_bgr, outscale=actual_scale)
-
-            # Convert back to RGB/RGBA
-            if has_alpha:
-                output_rgb = cv2.cvtColor(output_bgr, cv2.COLOR_BGRA2RGBA)
-            else:
-                output_rgb = cv2.cvtColor(output_bgr, cv2.COLOR_BGR2RGB)
-
-            # Convert back to PIL
-            output_img = Image.fromarray(output_rgb)
-            new_dimensions = output_img.size
-
-            # Determine output format
-            if output_format:
-                fmt = output_format.upper()
-                if fmt == 'JPG':
-                    fmt = 'JPEG'
-            else:
-                fmt = output_path.suffix.upper().lstrip('.')
-                if fmt == 'JPG':
-                    fmt = 'JPEG'
-                elif not fmt:
-                    fmt = 'PNG'
-
-            # Handle format-specific requirements
-            save_kwargs = {'optimize': True}
-            if fmt in ('JPEG', 'WEBP'):
-                save_kwargs['quality'] = quality
-                if fmt == 'JPEG' and output_img.mode == 'RGBA':
-                    background = Image.new('RGB', output_img.size, (255, 255, 255))
-                    background.paste(output_img, mask=output_img.split()[3])
-                    output_img = background
-
-            output_img.save(output_path, format=fmt, **save_kwargs)
-            output_size = os.path.getsize(output_path)
-
-            return ProcessingResult(
-                success=True,
-                input_path=str(input_path),
-                output_path=str(output_path),
-                operation="ai_upscale",
-                message=f"Upscaled {actual_scale}x: {orig_width}x{orig_height} -> {new_dimensions[0]}x{new_dimensions[1]} ({model.value})",
-                original_size=original_dimensions,
-                output_size=new_dimensions,
-                file_size_before=original_size,
-                file_size_after=output_size
-            )
-
-        except ImportError as e:
-            return ProcessingResult(
-                success=False,
-                input_path=str(input_path),
-                output_path=None,
-                operation="ai_upscale",
-                message=f"Real-ESRGAN not installed. Run: pip install realesrgan basicsr. Error: {str(e)}"
-            )
-        except Exception as e:
-            return ProcessingResult(
-                success=False,
-                input_path=str(input_path),
-                output_path=None,
-                operation="ai_upscale",
-                message=f"Error: {str(e)}"
-            )
-
-    def vectorize(self,
-                  input_path: Union[str, Path],
-                  output_path: Optional[Union[str, Path]] = None,
+    @_operation("vectorize")
+    def vectorize(self, input_path: Path,
+                  output_path: PathLike | None = None,
                   mode: VectorMode = VectorMode.ILLUSTRATION,
                   colormode: str = "color",
                   hierarchical: str = "stacked",
@@ -503,693 +487,398 @@ class PhotoEditor:
                   max_iterations: int = 10,
                   splice_threshold: int = 45,
                   path_precision: int = 3) -> ProcessingResult:
-        """
-        Convert a raster image to vector SVG using vtracer.
+        """Convert a raster image to vector SVG using vtracer.
+
+        The ``mode`` preset tunes the tracing parameters for the content type;
+        explicit keyword arguments fill in everything the preset doesn't set.
 
         Args:
-            input_path: Path to input image
-            output_path: Path for output SVG (default: input.svg)
-            mode: Vectorization preset (PHOTO, ILLUSTRATION, LOGO, PIXEL_ART)
-            colormode: "color" or "binary"
-            hierarchical: "stacked" or "cutout"
-            filter_speckle: Speckle filter size
-            color_precision: Color precision (1-8)
-            layer_difference: Layer difference threshold
-            corner_threshold: Corner detection threshold
-            length_threshold: Minimum path length
-            max_iterations: Max curve fitting iterations
-            splice_threshold: Path splicing threshold
-            path_precision: SVG path precision
-
-        Returns:
-            ProcessingResult with operation details
+            input_path: Path to input image.
+            output_path: Output path (default: ``<input>.svg``).
+            mode: PHOTO, ILLUSTRATION, LOGO, or PIXEL_ART.
+            colormode: "color" or "binary".
+            hierarchical: "stacked" or "cutout".
+            filter_speckle: Speckle filter size.
+            color_precision: Color precision (1-8).
+            layer_difference: Layer difference threshold.
+            corner_threshold: Corner detection threshold.
+            length_threshold: Minimum path length.
+            max_iterations: Max curve fitting iterations.
+            splice_threshold: Path splicing threshold.
+            path_precision: SVG path precision.
         """
-        input_path = Path(input_path)
+        output_path = self._resolve_output(input_path, output_path,
+                                           f"{input_path.stem}.svg")
 
-        if output_path is None:
-            output_path = input_path.parent / f"{input_path.stem}.svg"
-        output_path = self._ensure_output_dir(output_path)
+        img = Image.open(input_path)
+        original_size = img.size
+        if img.mode != "RGBA":
+            img = img.convert("RGBA")
 
-        try:
-            vtracer = _get_vtracer()
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
 
-            # Load image
-            img = Image.open(input_path)
-            original_size = os.path.getsize(input_path)
-            original_dimensions = img.size
+        params = {
+            "colormode": colormode,
+            "hierarchical": hierarchical,
+            "mode": "polygon",
+            "filter_speckle": filter_speckle,
+            "color_precision": color_precision,
+            "layer_difference": layer_difference,
+            "corner_threshold": corner_threshold,
+            "length_threshold": length_threshold,
+            "max_iterations": max_iterations,
+            "splice_threshold": splice_threshold,
+            "path_precision": path_precision,
+            **_VECTOR_STYLE_OVERRIDES.get(mode, {}),
+        }
+        svg = _get_vtracer().convert_raw_image_to_svg(
+            buffer.getvalue(), img_format="png", **params
+        )
+        output_path.write_text(svg, encoding="utf-8")
 
-            # Convert to RGBA if needed
-            if img.mode != 'RGBA':
-                img = img.convert('RGBA')
+        return self._success("vectorize", input_path, output_path,
+                             f"Vectorized to SVG ({mode.value} mode)",
+                             original_size, original_size)
 
-            # Apply mode presets
-            if mode == VectorMode.LOGO:
-                filter_speckle = 8
-                color_precision = 4
-                corner_threshold = 90
-            elif mode == VectorMode.PIXEL_ART:
-                filter_speckle = 0
-                color_precision = 8
-                corner_threshold = 0
-                length_threshold = 0
-            elif mode == VectorMode.PHOTO:
-                filter_speckle = 2
-                color_precision = 8
-                layer_difference = 8
-
-            # Convert to bytes for vtracer
-            img_bytes = io.BytesIO()
-            img.save(img_bytes, format='PNG')
-            img_bytes = img_bytes.getvalue()
-
-            # Vectorize
-            svg_str = vtracer.convert_raw_image_to_svg(
-                img_bytes,
-                img_format='png',
-                colormode=colormode,
-                hierarchical=hierarchical,
-                mode='polygon',  # 'polygon' or 'spline'
-                filter_speckle=filter_speckle,
-                color_precision=color_precision,
-                layer_difference=layer_difference,
-                corner_threshold=corner_threshold,
-                length_threshold=length_threshold,
-                max_iterations=max_iterations,
-                splice_threshold=splice_threshold,
-                path_precision=path_precision
-            )
-
-            # Save SVG
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(svg_str)
-
-            output_size = os.path.getsize(output_path)
-
-            return ProcessingResult(
-                success=True,
-                input_path=str(input_path),
-                output_path=str(output_path),
-                operation="vectorize",
-                message=f"Vectorized to SVG ({mode.value} mode)",
-                original_size=original_dimensions,
-                output_size=original_dimensions,  # SVG maintains dimensions
-                file_size_before=original_size,
-                file_size_after=output_size
-            )
-
-        except Exception as e:
-            return ProcessingResult(
-                success=False,
-                input_path=str(input_path),
-                output_path=None,
-                operation="vectorize",
-                message=f"Error: {str(e)}"
-            )
-
-    def remove_watermark(self,
-                         input_path: Union[str, Path],
-                         output_path: Optional[Union[str, Path]] = None,
+    @_operation("remove_watermark")
+    def remove_watermark(self, input_path: Path,
+                         output_path: PathLike | None = None,
                          watermark_position: str = "bottom-right",
                          watermark_height: int = 50,
                          watermark_width: int = 200,
                          padding: int = 10,
                          use_lama: bool = True) -> ProcessingResult:
-        """
-        Remove watermark from image using AI inpainting.
+        """Remove a corner watermark (like Gemini's) via AI inpainting.
 
-        Automatically detects and removes watermarks (like Gemini's) from corners.
-        Uses LaMa (Large Mask Inpainting) for best results, with OpenCV fallback.
+        Uses LaMa (Large Mask Inpainting) when installed, otherwise falls
+        back to OpenCV's TELEA inpainting.
 
         Args:
-            input_path: Path to input image
-            output_path: Path for output image (default: input_nowm.png)
-            watermark_position: Where the watermark is located:
-                - "bottom-right" (default, Gemini watermarks)
-                - "bottom-left"
-                - "top-right"
-                - "top-left"
-                - "bottom-center"
-            watermark_height: Height of watermark region in pixels (default: 50)
-            watermark_width: Width of watermark region in pixels (default: 200)
-            padding: Extra padding around watermark region (default: 10)
-            use_lama: Use LaMa AI inpainting (True) or OpenCV fallback (False)
-
-        Returns:
-            ProcessingResult with operation details
+            input_path: Path to input image.
+            output_path: Output path (default: ``<input>_nowm.png``).
+            watermark_position: "bottom-right" (default), "bottom-left",
+                "top-right", "top-left", or "bottom-center".
+            watermark_height: Height of the watermark region in pixels.
+            watermark_width: Width of the watermark region in pixels.
+            padding: Extra padding around the region.
+            use_lama: Prefer LaMa over the OpenCV fallback.
         """
-        input_path = Path(input_path)
+        output_path = self._resolve_output(input_path, output_path,
+                                           f"{input_path.stem}_nowm.png")
 
-        if output_path is None:
-            output_path = input_path.parent / f"{input_path.stem}_nowm.png"
-        output_path = self._ensure_output_dir(output_path)
+        img = Image.open(input_path).convert("RGB")
+        width, height = img.size
 
-        try:
-            # Load image
-            img = Image.open(input_path).convert('RGB')
-            img_array = np.array(img)
-            original_size = os.path.getsize(input_path)
-            original_dimensions = img.size
-            width, height = img.size
+        # Mask the watermark region (white = inpaint), capped to a sane
+        # fraction of the image so oversized boxes can't eat the picture.
+        box_h = min(watermark_height + padding * 2, height // 4)
+        box_w = min(watermark_width + padding * 2, width // 3)
+        x1, y1, x2, y2 = _watermark_box(watermark_position, width, height, box_w, box_h)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        mask[y1:y2, x1:x2] = 255
 
-            # Create mask for watermark region
-            mask = np.zeros((height, width), dtype=np.uint8)
+        lama = _get_lama() if use_lama else "opencv_fallback"
+        if lama != "opencv_fallback":
+            result_img = lama(img, Image.fromarray(mask))
+        else:
+            cv2 = _get_cv2()
+            result_array = cv2.inpaint(np.array(img), mask,
+                                       inpaintRadius=5, flags=cv2.INPAINT_TELEA)
+            result_img = Image.fromarray(result_array)
 
-            # Calculate watermark region based on position
-            wm_h = min(watermark_height + padding * 2, height // 4)
-            wm_w = min(watermark_width + padding * 2, width // 3)
+        result_img.save(output_path, format="PNG", optimize=True)
 
-            if watermark_position == "bottom-right":
-                y1, y2 = height - wm_h, height
-                x1, x2 = width - wm_w, width
-            elif watermark_position == "bottom-left":
-                y1, y2 = height - wm_h, height
-                x1, x2 = 0, wm_w
-            elif watermark_position == "top-right":
-                y1, y2 = 0, wm_h
-                x1, x2 = width - wm_w, width
-            elif watermark_position == "top-left":
-                y1, y2 = 0, wm_h
-                x1, x2 = 0, wm_w
-            elif watermark_position == "bottom-center":
-                y1, y2 = height - wm_h, height
-                x1, x2 = (width - wm_w) // 2, (width + wm_w) // 2
-            else:
-                # Default to bottom-right
-                y1, y2 = height - wm_h, height
-                x1, x2 = width - wm_w, width
+        return self._success("remove_watermark", input_path, output_path,
+                             f"Watermark removed from {watermark_position}",
+                             img.size, result_img.size)
 
-            # Set mask region to white (area to inpaint)
-            mask[y1:y2, x1:x2] = 255
-
-            # Perform inpainting
-            lama = _get_lama() if use_lama else "opencv_fallback"
-
-            if lama != "opencv_fallback":
-                # Use LaMa for high-quality inpainting
-                mask_img = Image.fromarray(mask)
-                result_img = lama(img, mask_img)
-            else:
-                # Fallback to OpenCV inpainting
-                cv2 = _get_cv2()
-                # Use TELEA algorithm for better results on larger areas
-                result_array = cv2.inpaint(
-                    img_array,
-                    mask,
-                    inpaintRadius=5,
-                    flags=cv2.INPAINT_TELEA
-                )
-                result_img = Image.fromarray(result_array)
-
-            # Save result
-            result_img.save(output_path, format='PNG', optimize=True)
-            output_size = os.path.getsize(output_path)
-
-            return ProcessingResult(
-                success=True,
-                input_path=str(input_path),
-                output_path=str(output_path),
-                operation="remove_watermark",
-                message=f"Watermark removed from {watermark_position}",
-                original_size=original_dimensions,
-                output_size=result_img.size,
-                file_size_before=original_size,
-                file_size_after=output_size
-            )
-
-        except Exception as e:
-            return ProcessingResult(
-                success=False,
-                input_path=str(input_path),
-                output_path=None,
-                operation="remove_watermark",
-                message=f"Error: {str(e)}"
-            )
-
-    def smart_resize(self,
-                     input_path: Union[str, Path],
-                     output_path: Optional[Union[str, Path]] = None,
-                     width: Optional[int] = None,
-                     height: Optional[int] = None,
-                     scale: Optional[float] = None,
+    @_operation("smart_resize")
+    def smart_resize(self, input_path: Path,
+                     output_path: PathLike | None = None,
+                     width: int | None = None,
+                     height: int | None = None,
+                     scale: float | None = None,
                      mode: ResizeMode = ResizeMode.LANCZOS,
                      maintain_aspect: bool = True,
-                     max_size: Optional[int] = None,
-                     output_format: Optional[str] = None,
+                     max_size: int | None = None,
+                     output_format: str | None = None,
                      quality: int = 95) -> ProcessingResult:
-        """
-        Smart resize with multiple algorithm options.
+        """Resize an image using the given algorithm.
 
         Args:
-            input_path: Path to input image
-            output_path: Path for output image
-            width: Target width (optional)
-            height: Target height (optional)
-            scale: Scale factor, e.g., 2.0 for 2x (optional)
-            mode: Resize algorithm (LANCZOS, BICUBIC, BILINEAR, NEAREST, SUPERRES)
-            maintain_aspect: Maintain aspect ratio
-            max_size: Maximum dimension (will scale down if larger)
-            output_format: Output format (png, jpg, webp)
-            quality: JPEG/WebP quality (1-100)
-
-        Returns:
-            ProcessingResult with operation details
+            input_path: Path to input image.
+            output_path: Output path (default derived from dimensions).
+            width: Target width.
+            height: Target height.
+            scale: Scale factor, e.g. 2.0 (alternative to width/height).
+            mode: LANCZOS, BICUBIC, BILINEAR, NEAREST, or SUPERRES.
+            maintain_aspect: Fit within width x height, keeping proportions.
+            max_size: Cap the longest side (scales down only).
+            output_format: png, jpg, or webp (default: from output path).
+            quality: JPEG/WebP quality (1-100).
         """
-        input_path = Path(input_path)
+        default_suffix = f"_{width}x{height}" if width and height else "_resized"
+        output_path = self._resolve_output(
+            input_path, output_path,
+            f"{input_path.stem}{default_suffix}{input_path.suffix}",
+        )
 
-        if output_path is None:
-            suffix = f"_{width}x{height}" if width and height else "_resized"
-            output_path = input_path.parent / f"{input_path.stem}{suffix}{input_path.suffix}"
-        output_path = self._ensure_output_dir(output_path)
+        img = Image.open(input_path)
+        original_size = img.size
+        new_size = _target_size(original_size, width, height, scale,
+                                maintain_aspect, max_size)
 
-        try:
-            img = Image.open(input_path)
-            original_size = os.path.getsize(input_path)
-            original_dimensions = img.size
-            orig_width, orig_height = original_dimensions
+        if mode == ResizeMode.SUPERRES:
+            resized = self._superres_resize(img, *new_size)
+        else:
+            resample = _RESAMPLING.get(mode, Image.Resampling.LANCZOS)
+            resized = img.resize(new_size, resample)
 
-            # Calculate target dimensions
-            if scale is not None:
-                new_width = int(orig_width * scale)
-                new_height = int(orig_height * scale)
-            elif width is not None and height is not None:
-                if maintain_aspect:
-                    # Fit within the box while maintaining aspect ratio
-                    ratio = min(width / orig_width, height / orig_height)
-                    new_width = int(orig_width * ratio)
-                    new_height = int(orig_height * ratio)
-                else:
-                    new_width, new_height = width, height
-            elif width is not None:
-                ratio = width / orig_width
-                new_width = width
-                new_height = int(orig_height * ratio)
-            elif height is not None:
-                ratio = height / orig_height
-                new_height = height
-                new_width = int(orig_width * ratio)
-            elif max_size is not None:
-                if max(orig_width, orig_height) > max_size:
-                    ratio = max_size / max(orig_width, orig_height)
-                    new_width = int(orig_width * ratio)
-                    new_height = int(orig_height * ratio)
-                else:
-                    new_width, new_height = orig_width, orig_height
-            else:
-                new_width, new_height = orig_width, orig_height
+        _save_image(resized, output_path, output_format, quality)
 
-            # Select resampling method
-            resample_methods = {
-                ResizeMode.LANCZOS: Image.Resampling.LANCZOS,
-                ResizeMode.BICUBIC: Image.Resampling.BICUBIC,
-                ResizeMode.BILINEAR: Image.Resampling.BILINEAR,
-                ResizeMode.NEAREST: Image.Resampling.NEAREST,
-            }
+        message = (f"Resized from {original_size[0]}x{original_size[1]} "
+                   f"to {new_size[0]}x{new_size[1]} ({mode.value})")
+        return self._success("smart_resize", input_path, output_path, message,
+                             original_size, new_size)
 
-            if mode == ResizeMode.SUPERRES:
-                # Use OpenCV's super resolution if available
-                resized = self._superres_resize(img, new_width, new_height)
-            else:
-                resample = resample_methods.get(mode, Image.Resampling.LANCZOS)
-                resized = img.resize((new_width, new_height), resample)
-
-            # Determine output format
-            if output_format:
-                fmt = output_format.upper()
-                if fmt == 'JPG':
-                    fmt = 'JPEG'
-            else:
-                fmt = output_path.suffix.upper().lstrip('.')
-                if fmt == 'JPG':
-                    fmt = 'JPEG'
-                elif not fmt:
-                    fmt = 'PNG'
-
-            # Handle format-specific requirements
-            save_kwargs = {'optimize': True}
-            if fmt in ('JPEG', 'WEBP'):
-                save_kwargs['quality'] = quality
-                if fmt == 'JPEG' and resized.mode == 'RGBA':
-                    # Convert RGBA to RGB for JPEG
-                    background = Image.new('RGB', resized.size, (255, 255, 255))
-                    background.paste(resized, mask=resized.split()[3])
-                    resized = background
-
-            resized.save(output_path, format=fmt, **save_kwargs)
-            output_size = os.path.getsize(output_path)
-
-            return ProcessingResult(
-                success=True,
-                input_path=str(input_path),
-                output_path=str(output_path),
-                operation="smart_resize",
-                message=f"Resized from {orig_width}x{orig_height} to {new_width}x{new_height} ({mode.value})",
-                original_size=original_dimensions,
-                output_size=(new_width, new_height),
-                file_size_before=original_size,
-                file_size_after=output_size
-            )
-
-        except Exception as e:
-            return ProcessingResult(
-                success=False,
-                input_path=str(input_path),
-                output_path=None,
-                operation="smart_resize",
-                message=f"Error: {str(e)}"
-            )
-
-    def _superres_resize(self, img: Image.Image, width: int, height: int) -> Image.Image:
-        """Use OpenCV for super resolution upscaling."""
+    @staticmethod
+    def _superres_resize(img: Image.Image, width: int, height: int) -> Image.Image:
+        """Resize via OpenCV cubic interpolation; LANCZOS if OpenCV is missing."""
         try:
             cv2 = _get_cv2()
-
-            # Convert PIL to OpenCV format
-            img_array = np.array(img)
-            if len(img_array.shape) == 3 and img_array.shape[2] == 4:
-                # RGBA to BGRA
-                img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGRA)
-            elif len(img_array.shape) == 3:
-                img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-            else:
-                img_cv = img_array
-
-            # Use INTER_CUBIC for upscaling (best quality without deep learning models)
-            resized = cv2.resize(img_cv, (width, height), interpolation=cv2.INTER_CUBIC)
-
-            # Convert back to PIL
-            if len(resized.shape) == 3 and resized.shape[2] == 4:
-                resized = cv2.cvtColor(resized, cv2.COLOR_BGRA2RGBA)
-            elif len(resized.shape) == 3:
-                resized = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-
-            return Image.fromarray(resized)
-
         except ImportError:
-            # Fallback to LANCZOS if OpenCV not available
             return img.resize((width, height), Image.Resampling.LANCZOS)
 
-    def process_full_pipeline(self,
-                              input_path: Union[str, Path],
-                              output_dir: Optional[Union[str, Path]] = None,
+        array = np.array(img)
+        color = array.ndim == 3
+        has_alpha = color and array.shape[2] == 4
+
+        if has_alpha:
+            array = cv2.cvtColor(array, cv2.COLOR_RGBA2BGRA)
+        elif color:
+            array = cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
+
+        resized = cv2.resize(array, (width, height), interpolation=cv2.INTER_CUBIC)
+
+        if has_alpha:
+            resized = cv2.cvtColor(resized, cv2.COLOR_BGRA2RGBA)
+        elif color:
+            resized = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(resized)
+
+    # -- pipelines ------------------------------------------------------------
+
+    def process_full_pipeline(self, input_path: PathLike,
+                              output_dir: PathLike | None = None,
                               remove_bg: bool = True,
                               ai_upscale: bool = False,
                               upscale_model: UpscaleModel = UpscaleModel.GENERAL_X4,
                               create_vector: bool = True,
-                              resize_config: Optional[dict] = None,
-                              vector_mode: VectorMode = VectorMode.ILLUSTRATION) -> List[ProcessingResult]:
-        """
-        Run the full processing pipeline on an image.
+                              resize_config: dict | None = None,
+                              vector_mode: VectorMode = VectorMode.ILLUSTRATION,
+                              ) -> list[ProcessingResult]:
+        """Run the full pipeline: remove background -> upscale -> vectorize -> resize.
 
-        Pipeline: Remove Background -> AI Upscale -> Vectorize -> Resize
+        Each enabled step feeds its output into the next; failed steps are
+        recorded and skipped over.
 
         Args:
-            input_path: Path to input image
-            output_dir: Output directory for all processed files
-            remove_bg: Whether to remove background
-            ai_upscale: Whether to AI upscale (Real-ESRGAN)
-            upscale_model: Which upscale model to use
-            create_vector: Whether to create vector SVG
-            resize_config: Dict with resize parameters (width, height, scale, etc.)
-            vector_mode: Vectorization style preset
-
-        Returns:
-            List of ProcessingResult for each operation
+            input_path: Path to input image.
+            output_dir: Output directory (default: ``<default_output_dir>/<stem>``).
+            remove_bg: Remove the background.
+            ai_upscale: AI-upscale with Real-ESRGAN.
+            upscale_model: Which upscale model to use.
+            create_vector: Also produce an SVG.
+            resize_config: Resize parameters (width, height, scale, mode) or
+                ``{"sizes": [...]}`` for multiple outputs.
+            vector_mode: Vectorization style preset.
         """
         input_path = Path(input_path)
-        if output_dir is None:
-            output_dir = self.default_output_dir / input_path.stem
-        output_dir = Path(output_dir)
+        output_dir = Path(output_dir) if output_dir else self.default_output_dir / input_path.stem
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        results = []
-        current_image = input_path
+        results: list[ProcessingResult] = []
+        current = input_path
 
-        # Step 1: Remove background
+        def run(result: ProcessingResult, chain: bool = False) -> None:
+            nonlocal current
+            results.append(result)
+            if chain and result.success:
+                current = Path(result.output_path)
+
         if remove_bg:
-            nobg_path = output_dir / f"{input_path.stem}_nobg.png"
-            result = self.remove_background(current_image, nobg_path)
-            results.append(result)
-            if result.success:
-                current_image = Path(result.output_path)
+            run(self.remove_background(current, output_dir / f"{input_path.stem}_nobg.png"),
+                chain=True)
 
-        # Step 2: AI Upscale (the magic for small AI images!)
         if ai_upscale:
-            scale = 2 if upscale_model == UpscaleModel.GENERAL_X2 else 4
-            upscale_path = output_dir / f"{input_path.stem}_upscaled_{scale}x.png"
-            result = self.ai_upscale(current_image, upscale_path, model=upscale_model)
-            results.append(result)
-            if result.success:
-                current_image = Path(result.output_path)
+            scale = upscale_model.scale
+            run(self.ai_upscale(current,
+                                output_dir / f"{input_path.stem}_upscaled_{scale}x.png",
+                                model=upscale_model),
+                chain=True)
 
-        # Step 3: Vectorize (use the processed version if available)
         if create_vector:
-            svg_path = output_dir / f"{input_path.stem}.svg"
-            result = self.vectorize(current_image, svg_path, mode=vector_mode)
-            results.append(result)
+            run(self.vectorize(current, output_dir / f"{input_path.stem}.svg",
+                               mode=vector_mode))
 
-        # Step 4: Smart resize (multiple sizes if configured)
         if resize_config:
-            sizes = resize_config.get('sizes', [resize_config])
-            for i, config in enumerate(sizes if isinstance(sizes, list) else [sizes]):
-                suffix = config.get('suffix', f'_{i}') if len(sizes) > 1 else '_resized'
-                resize_path = output_dir / f"{input_path.stem}{suffix}.png"
-                result = self.smart_resize(
-                    current_image,
-                    resize_path,
-                    width=config.get('width'),
-                    height=config.get('height'),
-                    scale=config.get('scale'),
-                    mode=config.get('mode', ResizeMode.LANCZOS)
-                )
-                results.append(result)
+            sizes = resize_config.get("sizes", [resize_config])
+            if not isinstance(sizes, list):
+                sizes = [sizes]
+            for i, config in enumerate(sizes):
+                suffix = config.get("suffix", f"_{i}") if len(sizes) > 1 else "_resized"
+                run(self.smart_resize(
+                    current, output_dir / f"{input_path.stem}{suffix}.png",
+                    width=config.get("width"), height=config.get("height"),
+                    scale=config.get("scale"),
+                    mode=config.get("mode", ResizeMode.LANCZOS),
+                ))
 
         return results
 
-    def batch_process(self,
-                      input_dir: Union[str, Path],
-                      output_dir: Optional[Union[str, Path]] = None,
-                      **pipeline_kwargs) -> List[List[ProcessingResult]]:
-        """
-        Batch process all images in a directory.
-
-        Args:
-            input_dir: Directory containing input images
-            output_dir: Output directory
-            **pipeline_kwargs: Arguments passed to process_full_pipeline
-
-        Returns:
-            List of results for each image
-        """
-        input_dir = Path(input_dir)
+    def batch_process(self, input_dir: PathLike,
+                      output_dir: PathLike | None = None,
+                      **pipeline_kwargs) -> list[list[ProcessingResult]]:
+        """Run the full pipeline on every supported image in a directory."""
         all_results = []
+        for file_path in Path(input_dir).iterdir():
+            if file_path.suffix.lower() not in self.SUPPORTED_FORMATS:
+                continue
 
-        for file_path in input_dir.iterdir():
-            if file_path.suffix.lower() in self.SUPPORTED_FORMATS:
-                img_output_dir = None
-                if output_dir:
-                    img_output_dir = Path(output_dir) / file_path.stem
+            img_output_dir = Path(output_dir) / file_path.stem if output_dir else None
+            results = self.process_full_pipeline(file_path, output_dir=img_output_dir,
+                                                 **pipeline_kwargs)
+            all_results.append(results)
 
-                results = self.process_full_pipeline(
-                    file_path,
-                    output_dir=img_output_dir,
-                    **pipeline_kwargs
-                )
-                all_results.append(results)
-
-                # Print progress
-                for r in results:
-                    status = "OK" if r.success else "FAIL"
-                    print(f"[{status}] {r.operation}: {r.input_path} -> {r.output_path or r.message}")
+            for r in results:
+                status = "OK" if r.success else "FAIL"
+                print(f"[{status}] {r.operation}: {r.input_path} -> {r.output_path or r.message}")
 
         return all_results
 
 
-def quick_remove_bg(input_path: str, output_path: Optional[str] = None) -> str:
-    """Quick function to remove background from an image."""
-    editor = PhotoEditor()
-    result = editor.remove_background(input_path, output_path)
+# ============================================================================
+# Quick one-shot helpers
+# ============================================================================
+
+def _unwrap(result: ProcessingResult) -> str:
+    """Return the output path of a successful result, or raise."""
     if result.success:
         return result.output_path
     raise RuntimeError(result.message)
 
 
-def quick_upscale(input_path: str, scale: int = 4, output_path: Optional[str] = None,
+def quick_remove_bg(input_path: str, output_path: str | None = None) -> str:
+    """Remove the background from an image; returns the output path."""
+    return _unwrap(PhotoEditor().remove_background(input_path, output_path))
+
+
+def quick_upscale(input_path: str, scale: int = 4, output_path: str | None = None,
                   model: str = "general") -> str:
-    """
-    Quick function to AI-upscale an image.
-
-    Args:
-        input_path: Path to input image
-        scale: Upscale factor (2 or 4)
-        output_path: Optional output path
-        model: Model type - "general", "anime", or "fast"
-
-    Returns:
-        Path to upscaled image
-
-    Example:
-        # Upscale Gemini art 4x
-        quick_upscale("gemini_512.png", scale=4)
-
-        # Use anime model
-        quick_upscale("illustration.png", model="anime")
-    """
-    model_map = {
-        "general": UpscaleModel.GENERAL_X4 if scale == 4 else UpscaleModel.GENERAL_X2,
-        "anime": UpscaleModel.ANIME_X4,
-        "fast": UpscaleModel.FAST_X4,
-    }
-    upscale_model = model_map.get(model, UpscaleModel.GENERAL_X4)
-
-    editor = PhotoEditor()
-    result = editor.ai_upscale(input_path, output_path, scale=scale, model=upscale_model)
-    if result.success:
-        return result.output_path
-    raise RuntimeError(result.message)
+    """AI-upscale an image (model: "general", "anime", or "fast")."""
+    upscale_model = UpscaleModel.from_name(model, scale)
+    return _unwrap(PhotoEditor().ai_upscale(input_path, output_path,
+                                            scale=scale, model=upscale_model))
 
 
-def quick_vectorize(input_path: str, output_path: Optional[str] = None) -> str:
-    """Quick function to vectorize an image."""
-    editor = PhotoEditor()
-    result = editor.vectorize(input_path, output_path)
-    if result.success:
-        return result.output_path
-    raise RuntimeError(result.message)
+def quick_vectorize(input_path: str, output_path: str | None = None) -> str:
+    """Convert an image to SVG; returns the output path."""
+    return _unwrap(PhotoEditor().vectorize(input_path, output_path))
 
 
-def quick_resize(input_path: str, width: int = None, height: int = None,
-                 output_path: Optional[str] = None) -> str:
-    """Quick function to resize an image."""
-    editor = PhotoEditor()
-    result = editor.smart_resize(input_path, output_path, width=width, height=height)
-    if result.success:
-        return result.output_path
-    raise RuntimeError(result.message)
+def quick_resize(input_path: str, width: int | None = None, height: int | None = None,
+                 output_path: str | None = None) -> str:
+    """Resize an image; returns the output path."""
+    return _unwrap(PhotoEditor().smart_resize(input_path, output_path,
+                                              width=width, height=height))
 
 
-def quick_remove_watermark(input_path: str, output_path: Optional[str] = None,
+def quick_remove_watermark(input_path: str, output_path: str | None = None,
                            position: str = "bottom-right") -> str:
-    """
-    Quick function to remove watermark from image.
-
-    Args:
-        input_path: Path to input image
-        output_path: Path for output (optional)
-        position: Watermark position - "bottom-right" (Gemini), "bottom-left", etc.
-
-    Returns:
-        Path to output file
-    """
-    editor = PhotoEditor()
-    result = editor.remove_watermark(input_path, output_path, watermark_position=position)
-    if result.success:
-        return result.output_path
-    raise RuntimeError(result.message)
+    """Remove a corner watermark; returns the output path."""
+    return _unwrap(PhotoEditor().remove_watermark(input_path, output_path,
+                                                  watermark_position=position))
 
 
-if __name__ == "__main__":
+# ============================================================================
+# CLI
+# ============================================================================
+
+def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="SuperCharged Photo Editor - AI-Powered Image Processing",
+        description="Photo Editor - AI-powered image processing",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # AI Upscale a small Gemini image 4x (THE MAGIC!)
     python photo_editor.py gemini_art.png --upscale
-
-    # Upscale with anime model
     python photo_editor.py illustration.png --upscale --upscale-model anime
-
-    # Remove background
     python photo_editor.py photo.png --remove-bg
-
-    # Full pipeline with upscaling
     python photo_editor.py ai_image.png --pipeline --upscale
-
-    # Convert to vector
     python photo_editor.py logo.png --vectorize
-        """
+        """,
     )
     parser.add_argument("input", help="Input image or directory")
     parser.add_argument("-o", "--output", help="Output path or directory")
     parser.add_argument("--remove-bg", action="store_true", help="Remove background (AI)")
     parser.add_argument("--upscale", action="store_true",
-                        help="AI upscale image 4x using Real-ESRGAN (best for AI art!)")
-    parser.add_argument("--upscale-2x", action="store_true",
-                        help="AI upscale image 2x")
+                        help="AI upscale 4x using Real-ESRGAN")
+    parser.add_argument("--upscale-2x", action="store_true", help="AI upscale 2x")
     parser.add_argument("--upscale-model", choices=["general", "anime", "fast"],
                         default="general", help="Upscale model (default: general)")
     parser.add_argument("--vectorize", action="store_true", help="Convert to SVG")
-    parser.add_argument("--resize", type=int, nargs=2, metavar=("W", "H"), help="Resize to WxH")
+    parser.add_argument("--resize", type=int, nargs=2, metavar=("W", "H"),
+                        help="Resize to WxH")
     parser.add_argument("--scale", type=float, help="Scale factor (e.g., 2.0)")
     parser.add_argument("--pipeline", action="store_true", help="Run full pipeline")
     parser.add_argument("--batch", action="store_true", help="Batch process directory")
-
     args = parser.parse_args()
 
     editor = PhotoEditor()
+    upscale_model = UpscaleModel.from_name(args.upscale_model,
+                                           scale=2 if args.upscale_2x else 4)
 
-    # Map model name to enum
-    upscale_model_map = {
-        "general": UpscaleModel.GENERAL_X4,
-        "anime": UpscaleModel.ANIME_X4,
-        "fast": UpscaleModel.FAST_X4,
-    }
-    if args.upscale_2x:
-        upscale_model = UpscaleModel.GENERAL_X2
-    else:
-        upscale_model = upscale_model_map.get(args.upscale_model, UpscaleModel.GENERAL_X4)
+    def report(result: ProcessingResult) -> None:
+        print(f"{'OK' if result.success else 'FAIL'}: {result.message}")
 
     if args.batch:
         results = editor.batch_process(
-            args.input,
-            args.output,
+            args.input, args.output,
             remove_bg=args.remove_bg or args.pipeline,
             ai_upscale=args.upscale or args.upscale_2x,
             upscale_model=upscale_model,
-            create_vector=args.vectorize or args.pipeline
+            create_vector=args.vectorize or args.pipeline,
         )
         print(f"\nProcessed {len(results)} images")
-
     elif args.pipeline:
         resize_config = None
         if args.resize:
-            resize_config = {'width': args.resize[0], 'height': args.resize[1]}
+            resize_config = {"width": args.resize[0], "height": args.resize[1]}
         elif args.scale:
-            resize_config = {'scale': args.scale}
+            resize_config = {"scale": args.scale}
 
-        results = editor.process_full_pipeline(
-            args.input,
-            args.output,
-            ai_upscale=args.upscale or args.upscale_2x,
-            upscale_model=upscale_model,
-            resize_config=resize_config
-        )
-        for r in results:
-            status = "OK" if r.success else "FAIL"
-            print(f"[{status}] {r.operation}: {r.message}")
-
+        for result in editor.process_full_pipeline(
+                args.input, args.output,
+                ai_upscale=args.upscale or args.upscale_2x,
+                upscale_model=upscale_model,
+                resize_config=resize_config):
+            print(f"[{'OK' if result.success else 'FAIL'}] {result.operation}: {result.message}")
     elif args.upscale or args.upscale_2x:
-        result = editor.ai_upscale(args.input, args.output, model=upscale_model)
-        print(f"{'OK' if result.success else 'FAIL'}: {result.message}")
-
+        report(editor.ai_upscale(args.input, args.output, model=upscale_model))
     elif args.remove_bg:
-        result = editor.remove_background(args.input, args.output)
-        print(f"{'OK' if result.success else 'FAIL'}: {result.message}")
-
+        report(editor.remove_background(args.input, args.output))
     elif args.vectorize:
-        result = editor.vectorize(args.input, args.output)
-        print(f"{'OK' if result.success else 'FAIL'}: {result.message}")
-
+        report(editor.vectorize(args.input, args.output))
     elif args.resize:
-        result = editor.smart_resize(args.input, args.output,
-                                     width=args.resize[0], height=args.resize[1])
-        print(f"{'OK' if result.success else 'FAIL'}: {result.message}")
-
+        report(editor.smart_resize(args.input, args.output,
+                                   width=args.resize[0], height=args.resize[1]))
     elif args.scale:
-        result = editor.smart_resize(args.input, args.output, scale=args.scale)
-        print(f"{'OK' if result.success else 'FAIL'}: {result.message}")
-
+        report(editor.smart_resize(args.input, args.output, scale=args.scale))
     else:
         parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
