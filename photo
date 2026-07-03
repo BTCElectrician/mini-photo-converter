@@ -1,218 +1,175 @@
 #!/usr/bin/env python3
 """
-Simple Photo Editor CLI - Works with any AI assistant or CLI tool
+Photo Editor CLI - simple commands for humans and AI assistants alike.
 
 Usage:
     photo button image.png          # Create a button
     photo banner image.png          # Create a banner
-    photo postcard image.png        # Create a postcard
     photo upscale image.png         # AI upscale 4x
-    photo upscale image.png 2       # AI upscale 2x
     photo rembg image.png           # Remove background
+    photo watermark image.png       # Remove corner watermark
     photo vector image.png          # Convert to SVG
     photo resize image.png 800 600  # Resize to 800x600
     photo list                      # Show all presets
 
-Any AI CLI (Claude, Codex, Cursor) can use these commands directly.
+Run `photo help` for the full command reference.
 """
 
 import sys
-import os
 from pathlib import Path
 
-# Add script directory to path for imports
-script_dir = Path(__file__).parent.absolute()
-sys.path.insert(0, str(script_dir))
+# Make sibling modules importable no matter where `photo` is invoked from
+sys.path.insert(0, str(Path(__file__).parent.absolute()))
 
-from photo_editor import PhotoEditor, UpscaleModel, VectorMode
 from format_converter import FormatConverter
-from presets import ALL_PRESETS, list_presets, FitMode
+from photo_editor import PhotoEditor, UpscaleModel
+from presets import ALL_PRESETS, FitMode, list_presets
+
+OUTPUT_BASE = Path("output")
+
+WATERMARK_POSITIONS = ("bottom-right", "bottom-left", "top-right", "top-left", "bottom-center")
+
+# Shorthand command names -> preset names (see presets.py for the full table)
+PRESET_SHORTHANDS = {
+    "btn": "button",
+    "twitter": "twitter_banner",
+    "instagram": "instagram_post",
+    "ig": "instagram_post",
+    "story": "instagram_story",
+    "facebook": "facebook_post",
+    "fb": "facebook_post",
+    "linkedin": "linkedin_post",
+    "youtube": "youtube_thumbnail",
+    "yt": "youtube_thumbnail",
+    "thumb": "thumbnail",
+    "card": "business_card",
+}
 
 
-def main():
-    if len(sys.argv) < 2:
+def output_path(folder: str, filename: str) -> Path:
+    """Path under ./output/<folder>/, creating the directory if needed."""
+    out_dir = OUTPUT_BASE / folder
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir / filename
+
+
+def parse_watermark_args(tokens: list[str]) -> tuple[str, int, int, int]:
+    """Parse ``[position] [height] [width] [padding]`` watermark arguments.
+
+    Defaults target a small corner mark (like Gemini's sparkle) so detail
+    near the corner isn't destroyed; pass explicit sizes for larger marks.
+    """
+    position = "bottom-right"
+    if tokens and tokens[0] in WATERMARK_POSITIONS:
+        position = tokens.pop(0)
+
+    numbers = [int(t) for t in tokens[:3] if t.isdigit()]
+    height = numbers[0] if len(numbers) > 0 else 28
+    width = numbers[1] if len(numbers) > 1 else (numbers[0] if numbers else 36)
+    padding = numbers[2] if len(numbers) > 2 else 8
+    return position, height, width, padding
+
+
+def main() -> int:
+    # --fit keeps the whole image (letterbox) instead of cropping to fill
+    use_fit_mode = "--fit" in sys.argv or "-f" in sys.argv
+    args = [a for a in sys.argv if a not in ("--fit", "-f")]
+
+    command = args[1].lower() if len(args) > 1 else ""
+
+    if not command or command in ("help", "-h", "--help"):
         print_usage()
-        return 1
+        if command:
+            list_presets()
+        return 0 if command else 1
 
-    # Check for --fit flag (keep whole image with letterbox)
-    use_fit_mode = '--fit' in sys.argv or '-f' in sys.argv
-    args = [a for a in sys.argv if a not in ['--fit', '-f']]
-
-    command = args[1].lower() if len(args) > 1 else ''
-
-    # List presets
-    if command in ['list', 'presets', 'help', '-h', '--help']:
-        if command == 'help' or command.startswith('-'):
-            print_usage()
+    if command in ("list", "presets"):
         list_presets()
         return 0
 
-    # Need at least command + image
     if len(args) < 3:
         print(f"Usage: photo {command} <image>")
         return 1
 
-    image_path = args[2]
-
-    if not os.path.exists(image_path):
-        print(f"Error: File not found: {image_path}")
+    input_path = Path(args[2])
+    if not input_path.exists():
+        print(f"Error: File not found: {input_path}")
         return 1
 
-    # Initialize tools
     editor = PhotoEditor()
-    converter = FormatConverter(output_base="output")
-    input_path = Path(image_path)
+    extra = args[3:]
 
-    # Fit mode override for format conversions
-    fit_override = FitMode.FIT if use_fit_mode else None
-
-    # Handle different commands
-    if command == 'upscale':
-        scale = int(sys.argv[3]) if len(sys.argv) > 3 else 4
-        if scale not in [2, 4]:
+    if command == "upscale":
+        scale = int(extra[0]) if extra and extra[0].isdigit() else 4
+        if scale not in (2, 4):
             scale = 4
-        output_dir = Path("output/upscaled")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{input_path.stem}_upscaled_{scale}x.png"
-        model = UpscaleModel.GENERAL_X4 if scale == 4 else UpscaleModel.GENERAL_X2
-        print(f"Upscaling {image_path} {scale}x...")
-        result = editor.ai_upscale(input_path, output_path, scale=scale, model=model)
-
-    elif command in ['rembg', 'nobg', 'removebg', 'transparent']:
-        output_dir = Path("output/no_background")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{input_path.stem}_nobg.png"
-        print(f"Removing background from {image_path}...")
-        result = editor.remove_background(input_path, output_path)
-
-    elif command in ['vector', 'svg', 'vectorize']:
-        output_dir = Path("output/vectors")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{input_path.stem}.svg"
-        print(f"Converting {image_path} to SVG...")
-        result = editor.vectorize(input_path, output_path)
-
-    elif command == 'resize':
-        if len(sys.argv) < 5:
-            print("Usage: photo resize <image> <width> <height>")
-            return 1
-        width = int(sys.argv[3])
-        height = int(sys.argv[4])
-        output_dir = Path("output/resized")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{input_path.stem}_{width}x{height}.png"
-        print(f"Resizing {image_path} to {width}x{height}...")
-        result = editor.smart_resize(input_path, output_path, width=width, height=height)
-
-    elif command in ['watermark', 'nowm', 'rmwm', 'dewatermark']:
-        # Corner edit (LaMa): default mask is SMALL so detail (e.g. hands) in the
-        # corner is not destroyed. Pass explicit h w [padding] for a larger region.
-        # Usage:
-        #   photo watermark <img>
-        #   photo watermark <img> <position>
-        #   photo watermark <img> <position> <h> <w> [padding]
-        tokens = sys.argv[3:]
-        position = "bottom-right"
-        wm_h: int | None = None
-        wm_w: int | None = None
-        padding: int | None = None
-        i = 0
-        if i < len(tokens) and tokens[i] in (
-            "bottom-right",
-            "bottom-left",
-            "top-right",
-            "top-left",
-            "bottom-center",
-        ):
-            position = tokens[i]
-            i += 1
-        if i < len(tokens) and tokens[i].isdigit():
-            wm_h = int(tokens[i])
-            i += 1
-        if i < len(tokens) and tokens[i].isdigit():
-            wm_w = int(tokens[i])
-            i += 1
-        if i < len(tokens) and tokens[i].isdigit():
-            padding = int(tokens[i])
-            i += 1
-        if wm_h is not None and wm_w is None:
-            wm_w = wm_h
-        # Safe defaults for a small corner mark (~sparkle); override if needed.
-        if wm_h is None:
-            wm_h = 28
-        if wm_w is None:
-            wm_w = 36
-        if padding is None:
-            padding = 8
-        output_dir = Path("output/no_watermark")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{input_path.stem}_nowm.png"
-        print(f"Editing corner of {image_path} ({position}, mask ~{wm_w}x{wm_h}+pad {padding})...")
-        result = editor.remove_watermark(
+        print(f"Upscaling {input_path} {scale}x...")
+        result = editor.ai_upscale(
             input_path,
-            output_path,
-            watermark_position=position,
-            watermark_height=wm_h,
-            watermark_width=wm_w,
-            padding=padding,
+            output_path("upscaled", f"{input_path.stem}_upscaled_{scale}x.png"),
+            scale=scale, model=UpscaleModel.from_name("general", scale),
         )
 
-    elif command in ALL_PRESETS:
-        # Direct preset name
-        mode_text = " (fit mode - keeping whole image)" if use_fit_mode else ""
-        print(f"Converting {image_path} to {command}{mode_text}...")
-        result = converter.convert(image_path, command, fit_mode_override=fit_override)
+    elif command in ("rembg", "nobg", "removebg", "transparent"):
+        print(f"Removing background from {input_path}...")
+        result = editor.remove_background(
+            input_path, output_path("no_background", f"{input_path.stem}_nobg.png"),
+        )
+
+    elif command in ("vector", "svg", "vectorize"):
+        print(f"Converting {input_path} to SVG...")
+        result = editor.vectorize(
+            input_path, output_path("vectors", f"{input_path.stem}.svg"),
+        )
+
+    elif command == "resize":
+        if len(extra) < 2:
+            print("Usage: photo resize <image> <width> <height>")
+            return 1
+        width, height = int(extra[0]), int(extra[1])
+        print(f"Resizing {input_path} to {width}x{height}...")
+        result = editor.smart_resize(
+            input_path,
+            output_path("resized", f"{input_path.stem}_{width}x{height}.png"),
+            width=width, height=height,
+        )
+
+    elif command in ("watermark", "nowm", "rmwm", "dewatermark"):
+        position, height, width, padding = parse_watermark_args(extra)
+        print(f"Editing corner of {input_path} ({position}, mask ~{width}x{height}+pad {padding})...")
+        result = editor.remove_watermark(
+            input_path,
+            output_path("no_watermark", f"{input_path.stem}_nowm.png"),
+            watermark_position=position,
+            watermark_height=height, watermark_width=width, padding=padding,
+        )
 
     else:
-        # Check for common aliases
-        aliases = {
-            'button': 'button',
-            'btn': 'button',
-            'banner': 'banner',
-            'twitter': 'twitter_banner',
-            'instagram': 'instagram_square',
-            'ig': 'instagram_square',
-            'story': 'instagram_story',
-            'facebook': 'facebook_post',
-            'fb': 'facebook_post',
-            'linkedin': 'linkedin_post',
-            'youtube': 'youtube_thumbnail',
-            'yt': 'youtube_thumbnail',
-            'postcard': 'postcard',
-            'flyer': 'flyer',
-            'poster': 'poster',
-            'icon': 'icon',
-            'favicon': 'favicon',
-            'thumb': 'thumbnail',
-            'thumbnail': 'thumbnail',
-            'hero': 'hero',
-            'avatar': 'avatar',
-            'card': 'business_card',
-        }
-
-        preset_name = aliases.get(command)
-        if preset_name:
-            mode_text = " (fit mode - keeping whole image)" if use_fit_mode else ""
-            print(f"Converting {image_path} to {preset_name}{mode_text}...")
-            result = converter.convert(image_path, preset_name, fit_mode_override=fit_override)
-        else:
+        preset_name = PRESET_SHORTHANDS.get(command, command)
+        if preset_name not in ALL_PRESETS:
             print(f"Unknown command: {command}")
             print("\nAvailable commands:")
-            print("  upscale, rembg, vector, resize")
+            print("  upscale, rembg, watermark, vector, resize")
             print("  button, banner, postcard, flyer, icon, thumbnail, hero...")
             print("\nRun 'photo list' to see all format presets")
             return 1
 
-    # Report result
+        mode_text = " (fit mode - keeping whole image)" if use_fit_mode else ""
+        print(f"Converting {input_path} to {preset_name}{mode_text}...")
+        converter = FormatConverter(output_base=OUTPUT_BASE)
+        result = converter.convert(
+            input_path, preset_name,
+            fit_mode_override=FitMode.FIT if use_fit_mode else None,
+        )
+
     if result.success:
         print(f"Done! Output: {result.output_path}")
         return 0
-    else:
-        print(f"Error: {result.message}")
-        return 1
+    print(result.message)
+    return 1
 
 
-def print_usage():
+def print_usage() -> None:
     print("""
 Photo Editor CLI - Simple commands for any AI assistant
 
@@ -259,7 +216,7 @@ EXAMPLES:
     photo upscale ai_art.png        # Upscale small AI image
     photo rembg portrait.jpg        # Remove background
     photo thumbnail art.png --fit   # Thumbnail with letterbox
-    photo watermark gemini.png       # Small bottom-right corner edit
+    photo watermark gemini.png      # Small bottom-right corner edit
     photo watermark image.png bottom-left
     photo watermark wide.png bottom-right 220 60 12  # Bigger region when needed
     photo postcard vacation.png     # Print-ready postcard
@@ -270,4 +227,4 @@ WATERMARK POSITIONS:
 
 
 if __name__ == "__main__":
-    sys.exit(main() or 0)
+    sys.exit(main())

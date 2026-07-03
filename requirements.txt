@@ -1,69 +1,49 @@
-# SuperCharged Photo Editor Dependencies
-# ======================================
+# Photo Editor dependencies
+# ==========================
 
-# Core imaging library
+# Core imaging
 Pillow>=10.0.0
+numpy>=1.24.0
+opencv-python>=4.8.0
 
-# AI-powered background removal (uses U2-Net deep learning)
+# AI background removal (U2-Net)
 rembg>=2.0.50
 
-# AI-powered image upscaling (Real-ESRGAN) - THE MAGIC FOR SMALL AI IMAGES!
-# This lets you upscale Gemini/DALL-E/Midjourney images 2x-4x WITHOUT losing quality
+# AI upscaling (Real-ESRGAN): enlarge images 2x-4x without quality loss
 realesrgan>=0.3.0
 basicsr>=1.4.2
 
-# PyTorch - Required for AI models (Real-ESRGAN, etc.)
-# Install the right version for your system:
-#
-#   Apple Silicon (M1/M2/M3) - MPS acceleration (RECOMMENDED):
-#     pip install torch torchvision
-#     (PyTorch auto-detects MPS and uses your GPU!)
-#
-#   CPU only:
-#     pip install torch torchvision
-#
-#   NVIDIA CUDA 11.8:
-#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-#
-#   NVIDIA CUDA 12.1:
-#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-#
+# PyTorch - required by the AI models above.
+# Pick the build for your hardware:
+#   Apple Silicon / CPU:  pip install torch torchvision
+#   NVIDIA CUDA 11.8:     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#   NVIDIA CUDA 12.1:     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 torch>=2.0.0
 torchvision>=0.15.0
 
 # Raster to vector conversion (Rust-based, fast)
 vtracer>=0.6.0
 
-# AI-powered inpainting for watermark removal (LaMa model)
+# AI inpainting for watermark removal (LaMa)
 simple-lama-inpainting>=0.1.0
 
 # Folder watching for auto-processing
 watchdog>=3.0.0
 
-# Computer vision and advanced image processing
-opencv-python>=4.8.0
+# REST API
+fastapi>=0.100.0
+uvicorn>=0.23.0
+python-multipart>=0.0.6
 
-# Numerical operations (required by rembg/opencv/realesrgan)
-numpy>=1.24.0
-
-# Optional: Face enhancement for upscaling
-# ----------------------------------------
-# gfpgan>=1.3.8           # Face restoration/enhancement
-
-# Optional: For enhanced image operations
-# ----------------------------------------
+# Optional extras
+# ---------------
+# gfpgan>=1.3.8           # Face restoration during upscaling
 # scipy>=1.11.0           # Advanced image filters
 # scikit-image>=0.21.0    # Image processing algorithms
 # imageio>=2.31.0         # Additional format support
 
-# Web/Mobile Integration (REST API)
-# ----------------------------------
-fastapi>=0.100.0          # Modern async API framework
-uvicorn>=0.23.0           # ASGI server
-python-multipart>=0.0.6   # File upload support
-
 # Development
 # -----------
-# pytest>=7.4.0           # Testing
-# black>=23.7.0           # Code formatting
-# mypy>=1.5.0             # Type checking
+# pytest>=7.4.0
+# black>=23.7.0
+# mypy>=1.5.0
